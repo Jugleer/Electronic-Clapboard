@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Pure-logic Python tests + cross-language fixture parity.
+  # Fast (a few seconds). Catches wire-format drift between the Python
+  # spec module and any caller of generate_slides.encode_1bpp_msb.
+  # -----------------------------------------------------------------------
+  python-tests:
+    name: pytest (frame_format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Python deps
+        run: pip install pytest pillow
+      - name: Run pytest
+        run: pytest tools/test_frame_format.py -v
+      - name: Verify oracle fixture is up to date
+        run: |
+          python tools/generate_oracle_fixture.py
+          git diff --exit-code -- web/src/__fixtures__/oracle_frame.bin
+
+  # -----------------------------------------------------------------------
+  # Firmware: native unit tests (host compiler), then ESP32-S3 build only.
+  # Native tests run on Linux where gcc is always present; on Windows dev
+  # boxes you'll need MinGW for `pio test -e native` locally — see README.
+  # -----------------------------------------------------------------------
+  pio-native-tests:
+    name: pio test -e native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+          key: pio-native-${{ hashFiles('platformio.ini') }}
+      - name: Run native tests
+        run: pio test -e native -v
+
+  pio-firmware-build:
+    name: pio run -e esp32s3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+          key: pio-esp32s3-${{ hashFiles('platformio.ini') }}
+      - name: Stub secrets.h so firmware compiles in CI
+        run: cp include/secrets.h.example include/secrets.h
+      - name: Build firmware (esp32s3)
+        run: pio run -e esp32s3
+
+  # -----------------------------------------------------------------------
+  # Frontend: typecheck + Vitest + production build, on the empty skeleton.
+  # The Vitest oracle test reads web/src/__fixtures__/oracle_frame.bin and
+  # cross-checks JS encoder output against the Python encoder.
+  # -----------------------------------------------------------------------
+  web:
+    name: web build / test / typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build

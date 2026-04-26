@@ -1,0 +1,14 @@
+# Force LF in repo for text. Windows working copies still get CRLF on
+# checkout when core.autocrlf=true.
+* text=auto eol=lf
+
+# Binary fixtures must NOT be touched by line-ending conversion. The
+# cross-language oracle fixture in particular: without this, a Windows
+# commit with core.autocrlf=true could silently corrupt bytes that happen
+# to be 0x0A or 0x0D, which would pass the local Vitest run (working tree
+# unchanged) and only fail on Linux CI after push.
+*.bin binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
