@@ -15,18 +15,34 @@ Full wiring is in [docs/wiring-guide.md](docs/wiring-guide.md). Follow the phase
 
 ## Build & flash
 
-Prerequisites: [PlatformIO Core](https://platformio.org/install) or the VSCode extension.
+PlatformIO Core is installed into a project-local venv at `.venv/` to keep it isolated from any system Python. First-time setup:
 
-```bash
+```powershell
+# From the project root, in PowerShell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install platformio
+```
+
+Day-to-day:
+
+```powershell
+# Activate the venv (once per terminal session)
+.\.venv\Scripts\Activate.ps1
+
 # Build
 pio run
 
-# Flash + open serial monitor (combined)
+# Flash + open serial monitor
 pio run -t upload -t monitor
 
 # Just monitor (if already flashed)
 pio device monitor
 ```
+
+If you prefer not to activate, invoke the venv's `pio.exe` directly: `.\.venv\Scripts\pio.exe run`.
+
+The VSCode PlatformIO extension works independently and doesn't need the venv — it ships its own Python + Core.
 
 The `platformio.ini` assumes the board enumerates on **COM5**. If yours is different, either change `upload_port` / `monitor_port` in `platformio.ini` or create a local `platformio_override.ini` (gitignored) that redefines them.
 
