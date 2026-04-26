@@ -28,6 +28,7 @@ CS:     GPIO 10
 DC:     GPIO 9
 RST:    GPIO 8
 BUSY:   GPIO 7
+PWR:    GPIO 6   # HAT rev2.3+ panel power enable (HIGH = on, LOW = off; image retained)
 
 # MOSFET gates
 LED_GATE:      GPIO 4   # → 220Ω → IRLZ44N gate (LED driver)

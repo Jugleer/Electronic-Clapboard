@@ -229,13 +229,22 @@ void loop() {
 | Waveshare 7.5" V2 e-paper + driver HAT | Comes with a ribbon cable; the HAT breaks out SPI pins |
 | Jumper wires (female-to-male) | To connect HAT header pins to breadboard |
 
+### HAT switch settings
+
+The Waveshare 7.5" V2 HAT has two onboard slide switches. Set them **before** powering on:
+
+| Switch | Setting | Why |
+|--------|---------|-----|
+| Display Config | **0.47R** | Selects the booster current-sense resistor for the 7.5" V2 panel. The `3R` position is for smaller/lower-current panels. Wrong setting → ghosting, washed-out output, incomplete refreshes. |
+| Interface Config | **4-line SPI** | Uses a dedicated DC pin (matches our GPIO 9 wiring and the `GxEPD2_750_T7` driver). 3-line mode multiplexes DC into the SPI stream as a 9th bit per byte — needs a different driver and saves a pin we don't need to save. |
+
 ### Wiring
 
 The Waveshare HAT has a standard header. Connect to the ESP32-S3:
 
 | HAT pin | Function | ESP32-S3 GPIO |
 |---------|----------|---------------|
-| VCC     | 3.3V     | 3V3           |
+| VCC     | 3.3V (logic supply) | 3V3   |
 | GND     | Ground   | GND           |
 | DIN     | SPI MOSI | GPIO 11       |
 | CLK     | SPI CLK  | GPIO 12       |
@@ -243,8 +252,24 @@ The Waveshare HAT has a standard header. Connect to the ESP32-S3:
 | DC      | Data/Command | GPIO 9    |
 | RST     | Reset    | GPIO 8        |
 | BUSY    | Busy signal | GPIO 7     |
+| PWR     | Panel power enable | GPIO 6 |
 
 **Note:** These pin choices avoid the strapping pins on the ESP32-S3 (GPIO 0, 3, 45, 46) which can cause boot failures if loaded. They also avoid GPIO 19/20 which are reserved for USB OTG.
+
+### About the PWR pin
+
+Newer revisions of the Waveshare 7.5" V2 HAT (rev2.3+) expose a **PWR** pin that gates the onboard panel power circuitry — drive it HIGH to power the display, LOW to cut power entirely. Because e-paper retains its image with no power, we wire PWR to a GPIO so firmware can shut the display down between takes. This meaningfully extends battery life on the 3S LiPo.
+
+If your board only has 8 pins (no PWR), it's an older revision — skip this pin and tie nothing; the panel is always-powered whenever VCC is present.
+
+**Firmware sequence for any display update:**
+1. Drive `EPD_PWR` HIGH
+2. Wait ~10 ms for the panel rails to settle
+3. Perform SPI transactions / refresh
+4. Wait for BUSY to go inactive (refresh complete)
+5. Drive `EPD_PWR` LOW
+
+Never toggle CS, DC, RST, or push SPI data while PWR is LOW — the panel's level shifters are unpowered and you risk latch-up through the protection diodes.
 
 ### Library setup
 
@@ -266,13 +291,22 @@ board_build.arduino.memory_type = qio_opi
 #include <GxEPD2_BW.h>
 #include <Fonts/FreeMonoBold24pt7b.h>
 
+#define EPD_PWR 6
+#define EPD_PWR_SETTLE_MS 10
+
 // Waveshare 7.5" V2 (800x480)
 GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT>
     display(GxEPD2_750_T7(/*CS=*/10, /*DC=*/9, /*RST=*/8, /*BUSY=*/7));
 
 void setup() {
+    pinMode(EPD_PWR, OUTPUT);
+    digitalWrite(EPD_PWR, LOW);   // Panel off until we're ready
+
     Serial.begin(115200);
     Serial.println("Initialising display...");
+
+    digitalWrite(EPD_PWR, HIGH);
+    delay(EPD_PWR_SETTLE_MS);
 
     display.init(115200);
     display.setRotation(1);  // Landscape
@@ -293,7 +327,9 @@ void setup() {
         display.println("Take:  001");
     } while (display.nextPage());
 
-    Serial.println("Display ready.");
+    display.hibernate();          // Tell the controller we're done
+    digitalWrite(EPD_PWR, LOW);   // Cut panel power — image remains visible
+    Serial.println("Display ready, panel powered down.");
 }
 
 void loop() {
@@ -339,6 +375,7 @@ Once all three phases work independently, integrate them:
 | LED stays on at boot | Missing 100kΩ pulldown on gate | Add the resistor |
 | ESP resets when solenoid fires | Ground bounce — solenoid return current going through ESP GND | Dedicated thick wire from solenoid MOSFET source to PSU GND |
 | E-paper shows nothing | SPI wiring wrong, or wrong GxEPD2 driver class | Double-check pin mapping; confirm `GxEPD2_750_T7` matches your panel revision |
+| E-paper init hangs / BUSY never deasserts | PWR pin left LOW or floating on rev2.3+ HAT | Drive `EPD_PWR` HIGH and wait 10 ms before calling `display.init()` |
 | E-paper shows garbled image | SPI signal integrity — long wires or ground noise | Shorten SPI wires, add 100nF ceramic cap between VCC and GND near the HAT |
 | Solenoid clicks weakly | Insufficient current — breadboard contact resistance | Bypass breadboard: solder the solenoid power wires directly to the PSU leads for testing |
 | MOSFET gets hot | Not fully enhanced (Vgs too low) or continuous conduction | Verify gate sees 3.3V; verify pulse code turns off; check for code hang |

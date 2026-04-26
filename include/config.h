@@ -12,6 +12,9 @@ constexpr uint8_t PIN_EPD_CS   = 10;
 constexpr uint8_t PIN_EPD_DC   = 9;
 constexpr uint8_t PIN_EPD_RST  = 8;
 constexpr uint8_t PIN_EPD_BUSY = 7;
+constexpr uint8_t PIN_EPD_PWR  = 6;   // HAT rev2.3+ panel power enable
+
+constexpr uint32_t EPD_PWR_SETTLE_MS = 10;
 
 // --- MOSFET gate drives ---
 constexpr uint8_t PIN_LED_GATE      = 4;
