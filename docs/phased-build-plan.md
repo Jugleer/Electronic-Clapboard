@@ -109,14 +109,14 @@ These are the concrete decisions and gotchas that emerged during the phase. Keep
    (transitive); not fixing in v1, none are in production dependencies
    for an air-gapped LAN device. Reassess at v2.
 
-4. **`pio test -e native` requires a host C++ compiler.** On this
-   Windows dev box there is no `gcc`/`g++` on PATH, so the native env
-   can't build locally. This isn't a Phase 0 regression — it was
-   already broken before Phase 0 started. CI runs the native env on
-   `ubuntu-latest` where the system toolchain is always present.
-   Windows contributors who want to run native tests locally need to
-   install MinGW or MSYS2 and put `g++.exe` on PATH; documented in the
-   [README](../README.md). Phase 1+ can rely on CI as the source of truth.
+4. **`pio test -e native` requires a host C++ compiler.** Phase 1
+   resolved this on the Windows dev box by installing MSYS2 + the
+   `mingw-w64-ucrt-x86_64-gcc` package and putting
+   `C:\msys64\ucrt64\bin` on the user PATH (full recipe in the
+   [README](../README.md)). All four native test binaries (state
+   machine + battery + sync placeholders, plus the new `test_status_json`)
+   now build and pass locally with GCC 15.2.0. CI continues to run the
+   native env on `ubuntu-latest`.
 
 5. **Test environment is Node, not jsdom.** `web/vite.config.ts` sets
    `test.environment = "node"` because Phase 0 tests are pure logic.
@@ -183,6 +183,113 @@ These are the concrete decisions and gotchas that emerged during the phase. Keep
 
 ### Hand-off
 A reachable HTTP endpoint exists. Next phase adds the data plane.
+
+### Phase 1 implementation notes (read me before Phase 2+)
+
+Concrete decisions and gotchas that emerged during the phase. Keep these
+in mind when picking up Phase 2 onward.
+
+1. **HTTP library: `mathieucarbou/ESPAsyncWebServer`.** Resolved the Phase 0
+   carry-forward decision. The maintained fork is preferred over the
+   abandoned `me-no-dev/ESP Async WebServer` (the latter has known
+   issues on modern ESP32-S3 Arduino cores). Built-in `WebServer.h` was
+   considered and rejected because it fully buffers POST bodies in heap
+   before the handler runs — Phase 2's 48 KB into PSRAM wants the
+   `onBody` chunk callback. Pinned in [platformio.ini](../platformio.ini)
+   under `[env:esp32s3-net]`. Rationale also recorded in
+   [docs/protocol.md](protocol.md) §2.0.
+
+2. **Typewriter is paused via parallel envs, not a build flag or
+   `legacy/` move.** [platformio.ini](../platformio.ini) now has two
+   ESP32 envs: `[env:esp32s3]` (default) compiles only
+   [src/main.cpp](../src/main.cpp) and is the SPI / EPD regression
+   canary. `[env:esp32s3-net]` compiles `main_net.cpp` + `net.cpp` +
+   `status_json.cpp`. CI builds both via a matrix. This keeps both
+   firmwares flashable with one command each and ensures the typewriter
+   doesn't quietly rot — anything not in the default build path stops
+   being exercised. Phase 4 of the firmware refactor formally retires
+   the typewriter env.
+
+3. **`/status` JSON builder is pure C++ in
+   [src/status_json.cpp](../src/status_json.cpp).** No `Arduino.h`, no
+   `WiFi.h`, no `ArduinoJson` (avoided dragging that into the native
+   env for one flat object). `StatusInputs` carries
+   `std::optional<LastFrameMeta>`; absent = the four `last_frame_*`
+   fields serialise as JSON `null`, not `0`. Native test
+   [test/test_status_json/](../test/test_status_json/) asserts the
+   contract from [protocol.md](protocol.md) §2.2 directly.
+
+4. **`firmware_version` comes from a build flag**, not a constant in
+   source. `[env:esp32s3-net]` sets `-D FIRMWARE_VERSION=\"0.1.0\"`.
+   Bump it as features land in subsequent phases.
+
+5. **CORS preflight: explicit `OPTIONS` handler per route, plus
+   `onNotFound` answers `OPTIONS *` cleanly.** Headers from
+   [protocol.md](protocol.md) §3 are applied to *every* response,
+   including 4xx — missing-headers-on-error-paths is the canonical
+   bite. The same handler shape is reused by Phase 2's `/frame` POST
+   when it lands; getting it right now means Phase 2 can't miss it.
+
+6. **Reconnect strategy: SDK auto-reconnect + our own 5s-backoff
+   kicker.** `WiFi.setAutoReconnect(true)` does most of the work, but a
+   tight bad-password loop has been observed to starve the Arduino
+   `loopTask` on some core versions. `net::service()` checks status
+   every loop and re-issues `WiFi.begin()` no more than every 5 s. The
+   "wrong password doesn't brick" acceptance test passes because the
+   watchdog never sees a busy-spin handler.
+
+7. **C++17 in the net env.** `std::optional` requires gnu++17;
+   `[env:esp32s3-net]` unflags `-std=gnu++11` and adds `-std=gnu++17`.
+   The typewriter env is left on the default standard so we don't
+   perturb the canary.
+
+8. **Hardware acceptance is manual, recorded inline.** Native CI
+   covers the JSON builder; the four hardware gates (boot + IP + mDNS,
+   `curl /status`, `curl -X OPTIONS /status` returning the three CORS
+   headers, router-power-cycle reconnect, wrong-password
+   doesn't-brick) are run on the bench and noted here when re-run.
+   **First Phase 1 bench pass: 2026-04-27.**
+   - `GET /status` returned 200 with the locked field shape: all four
+     `last_frame_*` keys serialised as literal JSON `null`,
+     `psram_free` ≈ 8.36 MB, `free_heap` ≈ 270 KB. CORS headers present.
+   - `OPTIONS /status` returned 204 with the three
+     `Access-Control-Allow-*` headers. Phase 2's preflight path is
+     proven before the data plane lands.
+   - Router-power-cycle reconnect was deliberately deferred — the
+     mechanism is identical to the wrong-password retry path which
+     was exercised, so the risk of skipping it is low.
+   - Wrong-password test: SDK reports `Reason: 15
+     4WAY_HANDSHAKE_TIMEOUT` followed by `Reason: 8 ASSOC_LEAVE` on a
+     ~3 s SDK cadence; our `[net] reconnect attempt` fires every 5 s
+     as designed. No watchdog reset, no panic, no crash-loop. HTTP and
+     TCP-log servers remain reachable on the IP throughout (mDNS is
+     down because Wi-Fi is). Brick-resistance confirmed.
+
+9. **SDK warnings (`[W][WiFiGeneric.cpp:...]`) bypass `clap_log`.**
+   They go to UART directly via the IDF logging system (controlled by
+   `CORE_DEBUG_LEVEL=3` in [platformio.ini](../platformio.ini)) and so
+   appear on USB serial but **not** on the TCP log tail. Our own
+   `clap_log()` calls appear on both. If a future phase wants SDK
+   warnings over Wi-Fi too, install `esp_log_set_vprintf` to redirect
+   IDF logs into the ring buffer. Not required for v1.
+
+10. **TCP log streaming on port 23 (added late in Phase 1).** The dev
+    box uses a USB isolator that doesn't pass enough current to power
+    the ESP32 alone, and re-enumeration through the isolator confuses
+    the host serial monitor when the chip switches from bootloader to
+    firmware USB-CDC. Working around this with `nc` proved fragile, so
+    we added an in-firmware log streamer over Wi-Fi: `clap_log()` tees
+    to both `Serial` and an 8 KB ring buffer; an AsyncTCP listener on
+    :23 streams the ring to one client at a time, replaying buffered
+    history on connect and surfacing dropped bytes if the writer laps
+    the reader. **Limitation:** does NOT capture firmware panics — the
+    network stack goes down before a guru meditation can leave the
+    chip. Keep USB serial for crash investigation. Documented in
+    [protocol.md](protocol.md) §2.4 as informational/dev-only;
+    explicitly NOT part of the wire contract. New native test
+    `test_log_ring` (12 cases) covers the ring buffer's drop-oldest
+    semantics. Bench-confirmed working from PowerShell via
+    `Invoke-WebRequest`-style or `curl.exe` clients on 2026-04-27.
 
 ---
 

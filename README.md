@@ -30,15 +30,25 @@ Day-to-day:
 # Activate the venv (once per terminal session)
 .\.venv\Scripts\Activate.ps1
 
-# Build
+# Build the default env (typewriter demo — SPI / EPD canary)
 pio run
 
-# Flash + open serial monitor
+# Build the Phase 1 network firmware (Wi-Fi + mDNS + /status)
+pio run -e esp32s3-net
+
+# Flash + open serial monitor (default env)
 pio run -t upload -t monitor
+
+# Flash the network firmware specifically
+pio run -e esp32s3-net -t upload -t monitor
 
 # Just monitor (if already flashed)
 pio device monitor
 ```
+
+Two ESP32 envs build side-by-side: `esp32s3` is the typewriter demo (the SPI / EPD regression canary, alive until Phase 4 of the firmware refactor) and `esp32s3-net` is the Phase 1+ network firmware. Pick whichever you want to flash; CI builds both on every push.
+
+Before flashing the network firmware, copy `include/secrets.h.example` to `include/secrets.h` and fill in `WIFI_SSID` / `WIFI_PASSWORD`. The `secrets.h` file is gitignored.
 
 If you prefer not to activate, invoke the venv's `pio.exe` directly: `.\.venv\Scripts\pio.exe run`.
 
@@ -85,16 +95,56 @@ pio test -e esp32s3
 cd web && npm test
 ```
 
-`pio test -e native` requires a host C++ compiler (`g++` / `gcc`) on PATH. On Linux/macOS this is usually present. **On Windows you'll need MinGW or MSYS2** — install one of them and ensure `g++.exe` is on PATH, otherwise PlatformIO's native env can't build the test binary. CI runs the native env on `ubuntu-latest`, so this is a dev-box convenience only.
+`pio test -e native` requires a host C++ compiler (`g++` / `gcc`) on PATH. On Linux/macOS this is usually present. **On Windows**, install the MSYS2 UCRT64 GCC toolchain:
+
+```powershell
+# One-time setup (PowerShell, no admin needed)
+winget install --id MSYS2.MSYS2 --silent --accept-package-agreements --accept-source-agreements
+& "C:\msys64\usr\bin\pacman.exe" -Sy --noconfirm
+& "C:\msys64\usr\bin\pacman.exe" -S --noconfirm --needed mingw-w64-ucrt-x86_64-gcc
+
+# Persist on user PATH (open a fresh shell afterwards to pick it up)
+$ucrt = 'C:\msys64\ucrt64\bin'
+$cur  = [Environment]::GetEnvironmentVariable('Path','User')
+if (($cur -split ';') -notcontains $ucrt) {
+  [Environment]::SetEnvironmentVariable('Path', "$cur;$ucrt", 'User')
+}
+```
+
+Verify with `g++ --version`, then `pio test -e native` from the project root. CI runs the native env on `ubuntu-latest`, so this is a dev-box convenience.
+
+## Talking to the device (Phase 1+)
+
+Once the `esp32s3-net` firmware is flashed and your laptop is on the same LAN:
+
+```bash
+# mDNS path — works on macOS / Linux / Windows-with-Bonjour
+curl http://clapboard.local/status
+
+# CORS preflight — should return 204 with the three Allow-* headers
+curl -i -X OPTIONS http://clapboard.local/status
+
+# Raw IP fallback — read the IP from the serial log
+curl http://192.168.x.y/status
+
+# Live firmware log stream over Wi-Fi (single client at a time, telnet-style)
+nc clapboard.local 23
+# or:  telnet clapboard.local 23
+```
+
+The `nc clapboard.local 23` tail is the workaround for "USB serial is unreachable" — useful when the device is on battery, behind a USB isolator, or otherwise out of reach. New connections see the last ~8 KB of buffered logs replayed first, then live lines. Caveat: this stream cannot capture firmware **panics** — when the chip throws, the network stack goes down before the panic message escapes. Use USB serial for crash investigation. The endpoint is documented in [protocol.md](docs/protocol.md) §2.4 as informational/dev-only.
+
+**Windows mDNS gotcha:** Windows 10/11 without Bonjour or iTunes installed often fails to resolve `*.local` names reliably. If `ping clapboard.local` doesn't answer, fall back to the raw DHCP IP (printed on the serial monitor at boot). The browser editor will accept either.
 
 ## CI
 
-The [GitHub Actions workflow](.github/workflows/ci.yml) runs four jobs on every push and PR:
+The [GitHub Actions workflow](.github/workflows/ci.yml) runs five jobs on every push and PR:
 
 1. `pytest tools/test_frame_format.py` + verify the oracle fixture is up to date.
-2. `pio test -e native` (firmware host-side tests).
-3. `pio run -e esp32s3` (firmware build only — no upload).
-4. `web/` typecheck + test + build.
+2. `pio test -e native` (firmware host-side tests, including `/status` JSON builder).
+3. `pio run -e esp32s3` (typewriter firmware build — SPI canary).
+4. `pio run -e esp32s3-net` (Phase 1+ network firmware build).
+5. `web/` typecheck + test + build.
 
 Any drift between the Python and JS wire-format encoders fails CI before merge.
 
@@ -116,7 +166,13 @@ Any drift between the Python and JS wire-format encoders fails CI before merge.
 │   ├── config.h               # Pin defines, timing constants, thresholds
 │   └── secrets.h.example      # Wi-Fi creds template (real secrets.h gitignored)
 ├── src/
-│   └── main.cpp               # Firmware entry point
+│   ├── main.cpp               # Typewriter demo (env: esp32s3)
+│   ├── main_net.cpp           # Phase 1+ network firmware entry (env: esp32s3-net)
+│   ├── net.h / net.cpp        # Wi-Fi + mDNS + AsyncWebServer (Phase 1)
+│   ├── status_json.h / .cpp   # Pure-C++ /status JSON builder (host-testable)
+│   ├── log_ring.h / .cpp      # Pure-C++ ring buffer for log streaming (host-testable)
+│   ├── clap_log.h / .cpp      # Firmware logging API: tees to Serial + ring
+│   └── log_server.h / .cpp    # AsyncTCP listener on :23 streaming the ring
 ├── lib/                       # Local libraries (empty)
 ├── tools/
 │   ├── frame_format.py        # Wire-format spec (authoritative)
@@ -126,7 +182,9 @@ Any drift between the Python and JS wire-format encoders fails CI before merge.
 ├── test/
 │   ├── test_state_machine/
 │   ├── test_battery/
-│   └── test_sync/
+│   ├── test_sync/
+│   ├── test_status_json/      # /status JSON builder unit tests (Phase 1)
+│   └── test_log_ring/         # Log ring buffer unit tests (Phase 1)
 └── web/
     ├── package.json           # React + Vite + TS + Vitest skeleton
     ├── vite.config.ts

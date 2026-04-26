@@ -65,6 +65,18 @@ Bonjour/iTunes installed; the editor must accept a manual host override.
 All bodies and responses use `\r\n` line endings per RFC 7230. JSON responses
 are UTF-8 with `Content-Type: application/json`.
 
+### 2.0 Server implementation (informational, not part of the contract)
+
+Phase 1 picked `mathieucarbou/ESPAsyncWebServer` (with `mathieucarbou/AsyncTCP`)
+over the built-in Arduino `WebServer.h`. Reason: Phase 2 streams a 48 KB
+`application/octet-stream` body into PSRAM; the async library exposes the
+`onBody` chunk callback we need, while `WebServer.h` fully buffers the body
+in heap before the handler runs. Switching libraries between Phase 1 and
+Phase 2 would mean re-doing routing and CORS plumbing in the keystone
+phase, so the dependency lands now while the surface area is one route.
+Rationale recorded here so future phases don't re-litigate it; clients see
+no difference.
+
 ### 2.1 `POST /frame` — push a frame to the panel
 
 | Field            | Value                                 |
@@ -133,6 +145,38 @@ Reserved. Body is empty. Response is JSON `{ "ok": true, "fired_at_ms": ... }`.
 Returns `503` if battery is below `LOW_BATTERY_THRESHOLD_MV` from
 [include/config.h](../include/config.h). Pulse durations are firmware-enforced
 and not configurable over the wire in v1.
+
+### 2.4 TCP log stream on port 23 (informational, dev/diagnostic only)
+
+Not part of the wire contract — strictly a developer convenience for
+debugging when USB serial isn't reachable (e.g. battery-only operation
+through a USB isolator). The firmware listens on TCP port 23 and streams
+firmware log lines as plain UTF-8 text. Connect with any raw-TCP client:
+
+```bash
+nc clapboard.local 23
+# or
+telnet clapboard.local 23
+```
+
+Behaviour:
+
+- **Single client at a time.** Second connections receive a one-line
+  `[log] busy` notice and are dropped immediately.
+- **Replay then live.** New clients see the last ~8 KB of buffered log
+  history first, then live-streamed lines as they're emitted.
+- **Drop-oldest backpressure.** If the network can't keep up, oldest
+  bytes in the ring are silently overwritten; the next drained chunk
+  prefixes the gap with `[log] *** N bytes lost ***`.
+- **Does NOT capture firmware panics.** When the chip panics, the
+  network stack goes down before any panic message can leave. Use USB
+  serial for crash investigation. This endpoint is a runtime debugging
+  tool only.
+- **No auth, no encryption.** Trusted-LAN model, same as the rest of
+  v1. Do not expose to untrusted networks.
+
+This endpoint is not versioned and may change without bumping the
+protocol version. Clients must not depend on its presence or format.
 
 ---
 
