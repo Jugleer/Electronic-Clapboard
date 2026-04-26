@@ -56,8 +56,15 @@ jobs:
         run: pio test -e native -v
 
   pio-firmware-build:
-    name: pio run -e esp32s3
+    # Builds both firmware envs side-by-side. `esp32s3` is the typewriter
+    # demo (SPI / EPD regression canary, stays alive until Phase 4 of the
+    # firmware refactor). `esp32s3-net` is the Phase 1+ network firmware.
+    name: pio run (${{ matrix.env }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp32s3, esp32s3-net]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,11 +79,11 @@ jobs:
           path: |
             ~/.platformio/.cache
             ~/.platformio/packages
-          key: pio-esp32s3-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
       - name: Stub secrets.h so firmware compiles in CI
         run: cp include/secrets.h.example include/secrets.h
-      - name: Build firmware (esp32s3)
-        run: pio run -e esp32s3
+      - name: Build firmware (${{ matrix.env }})
+        run: pio run -e ${{ matrix.env }}
 
   # -----------------------------------------------------------------------
   # Frontend: typecheck + Vitest + production build, on the empty skeleton.
