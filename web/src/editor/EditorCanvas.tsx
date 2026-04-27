@@ -24,6 +24,7 @@ import { getCachedIcon } from "./icons/loader";
 import { getCachedImage } from "./imageCache";
 import { useEditorStore } from "./store";
 import { TextEditorOverlay } from "./TextEditorOverlay";
+import { useDitheredImagePreview } from "./useDitheredImagePreview";
 import { cssFontFamily } from "./types";
 import type {
   Element,
@@ -33,6 +34,10 @@ import type {
   RectElement,
   TextElement,
 } from "./types";
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
 interface EditorCanvasProps {
   stageRef: React.MutableRefObject<Konva.Stage | null>;
@@ -66,9 +71,19 @@ export function EditorCanvas({
   const gridSpacing = useGridStore((s) => s.spacing);
   const snapEnabled = useGridStore((s) => s.snapEnabled);
   const gridVisible = useGridStore((s) => s.visible);
+  const borderWidth = useGridStore((s) => s.borderWidth);
+  const stageW = WIDTH + 2 * borderWidth;
+  const stageH = HEIGHT + 2 * borderWidth;
   const snapXY = (p: { x: number; y: number }) => ({
     x: snap(p.x, gridSpacing, snapEnabled),
     y: snap(p.y, gridSpacing, snapEnabled),
+  });
+  // Stage pointer positions are in stage-space; element / marquee
+  // logic lives in element-space (origin at the inner frame's
+  // top-left). Convert by subtracting the border offset.
+  const toElementSpace = (p: { x: number; y: number }) => ({
+    x: p.x - borderWidth,
+    y: p.y - borderWidth,
   });
 
   const transformerRef = useRef<Konva.Transformer | null>(null);
@@ -106,8 +121,9 @@ export function EditorCanvas({
     if (e.target !== e.target.getStage()) return;
     const stage = e.target.getStage();
     if (!stage) return;
-    const pos = stage.getPointerPosition();
-    if (!pos) return;
+    const raw = stage.getPointerPosition();
+    if (!raw) return;
+    const pos = toElementSpace(raw);
     if (!e.evt.shiftKey) {
       clearSelection(); // also clears isolatedGroupId
     }
@@ -122,8 +138,9 @@ export function EditorCanvas({
     if (!marqueeStartRef.current) return;
     const stage = e.target.getStage();
     if (!stage) return;
-    const pos = stage.getPointerPosition();
-    if (!pos) return;
+    const raw = stage.getPointerPosition();
+    if (!raw) return;
+    const pos = toElementSpace(raw);
     const start = marqueeStartRef.current;
     setMarquee({
       x: Math.min(start.x, pos.x),
@@ -157,8 +174,8 @@ export function EditorCanvas({
       ref={containerRef}
       style={{
         position: "relative",
-        width: WIDTH,
-        height: HEIGHT,
+        width: stageW,
+        height: stageH,
         border: "1px solid #888",
         background: "white",
         maxWidth: "100%",
@@ -166,8 +183,8 @@ export function EditorCanvas({
     >
       <Stage
         ref={stageRef}
-        width={WIDTH}
-        height={HEIGHT}
+        width={stageW}
+        height={stageH}
         onMouseDown={onStageMouseDown}
         onMouseMove={onStageMouseMove}
         onMouseUp={onStageMouseUp}
@@ -176,15 +193,16 @@ export function EditorCanvas({
         onTouchEnd={() => onStageMouseUp({} as Konva.KonvaEventObject<MouseEvent>)}
       >
         {gridVisible ? (
-          <Layer listening={false}>
+          <Layer listening={false} x={borderWidth} y={borderWidth}>
             <GridDots spacing={gridSpacing} />
           </Layer>
         ) : null}
-        <Layer>
+        <Layer x={borderWidth} y={borderWidth}>
           {elements.map((el) => (
             <ElementNode
               key={el.id}
               el={el}
+              borderWidth={borderWidth}
               isSelected={selectedIds.includes(el.id)}
               isEditing={el.id === editingId}
               registerRef={(node) => {
@@ -287,6 +305,64 @@ export function EditorCanvas({
             />
           ) : null}
         </Layer>
+        {borderWidth > 0 ? (
+          // The frame-boundary overlay sits on top of every element so
+          // (a) the *border zone* renders at 50% opacity (a white
+          // wash dims the staging area outside the rasterised frame),
+          // making it obvious which content is actually live, and
+          // (b) a dashed 2 px stroke marks the rasterised boundary.
+          // The wash is built from four rects ringing the inner
+          // frame — Konva.Shape sceneFunc would be tighter, but four
+          // rects keep the diff readable and there's no perf concern
+          // at 800×480 + ~20 px on each side.
+          // This layer is purely decorative — listening:false keeps
+          // it out of hit-testing, and the rasteriser is decoupled
+          // from Konva so it never appears in the bytes-on-the-wire.
+          <Layer listening={false}>
+            <KRect
+              x={0}
+              y={0}
+              width={stageW}
+              height={borderWidth}
+              fill="white"
+              opacity={0.5}
+            />
+            <KRect
+              x={0}
+              y={borderWidth + HEIGHT}
+              width={stageW}
+              height={borderWidth}
+              fill="white"
+              opacity={0.5}
+            />
+            <KRect
+              x={0}
+              y={borderWidth}
+              width={borderWidth}
+              height={HEIGHT}
+              fill="white"
+              opacity={0.5}
+            />
+            <KRect
+              x={borderWidth + WIDTH}
+              y={borderWidth}
+              width={borderWidth}
+              height={HEIGHT}
+              fill="white"
+              opacity={0.5}
+            />
+            <KRect
+              x={borderWidth}
+              y={borderWidth}
+              width={WIDTH}
+              height={HEIGHT}
+              stroke="#888"
+              strokeWidth={2}
+              dash={[6, 4]}
+              fillEnabled={false}
+            />
+          </Layer>
+        ) : null}
       </Stage>
       {editingId ? (
         <TextEditorOverlay
@@ -377,6 +453,8 @@ function boundingBox(el: Element): { x: number; y: number; w: number; h: number 
 
 interface ElementNodeProps {
   el: Element;
+  /** Pixel width of the staging border, 0 = no border. */
+  borderWidth: number;
   isSelected: boolean;
   isEditing: boolean;
   registerRef: (node: Konva.Node | null) => void;
@@ -390,6 +468,7 @@ interface ElementNodeProps {
 
 function ElementNode({
   el,
+  borderWidth,
   isSelected,
   isEditing,
   registerRef,
@@ -407,11 +486,27 @@ function ElementNode({
     else registerRef(null);
   };
 
+  // Drag-time clamp keeps the element from leaving the staging frame
+  // without waiting for the commit-time clamp in the store (which
+  // would visibly snap-back). Konva's `dragBoundFunc` returns
+  // *absolute* (stage-space) coords; the elements layer is offset by
+  // `(borderWidth, borderWidth)`, so the legal stage-space region is
+  // `[0, WIDTH + 2 * borderWidth - el.w]` and the matching y range.
+  // Lines are excluded — they have their own renderer with separate
+  // endpoint anchors and lean on the post-commit clamp instead.
   const common = {
     x: el.x,
     y: el.y,
     rotation: el.rotation,
     draggable: !el.locked,
+    dragBoundFunc: (pos: { x: number; y: number }) => {
+      const w = Math.max(1, el.w);
+      const h = Math.max(1, el.h);
+      return {
+        x: clamp(pos.x, 0, WIDTH + 2 * borderWidth - w),
+        y: clamp(pos.y, 0, HEIGHT + 2 * borderWidth - h),
+      };
+    },
     onMouseDown: (e: Konva.KonvaEventObject<MouseEvent>) => {
       e.cancelBubble = true;
       onSelect(e.evt.shiftKey);
@@ -499,70 +594,28 @@ function ElementNode({
         />
       );
     }
-    // Inverted preview: an outline icon on a black backdrop, matching
-    // the rasterised bytes' silhouette aesthetic. Konva can't do a
-    // per-shape `difference` composite without forcing a sync cache(),
-    // so we lean on the much simpler trick of drawing a black rect
-    // beneath an opacity-50 ghost of the un-inverted icon — close
-    // enough as a "this will render inverted on the panel" hint.
-    return (
-      <>
-        {ic.invert ? (
-          <KRect
-            x={ic.x}
-            y={ic.y}
-            width={ic.w}
-            height={ic.h}
-            rotation={ic.rotation}
-            fill="black"
-            listening={false}
-          />
-        ) : null}
-        <KImage
-          ref={setRef}
-          {...common}
-          image={img as unknown as HTMLImageElement}
-          width={ic.w}
-          height={ic.h}
-          opacity={ic.invert ? 0.4 : 1}
-          onDblClick={onDblNonText}
-          onDblTap={onDblNonText}
-        />
-      </>
-    );
-  }
-
-  if (el.type === "image") {
-    const im = el as ImageElement;
-    const img = getCachedImage(im.dataUrl);
-    if (!img) {
-      return (
-        <KRect
-          ref={setRef}
-          {...common}
-          width={im.w}
-          height={im.h}
-          stroke="#bbb"
-          strokeWidth={1}
-          dash={[3, 3]}
-          fill="transparent"
-          onDblClick={onDblNonText}
-          onDblTap={onDblNonText}
-        />
-      );
-    }
+    // Icons render with their native transparency. When `invert` is
+    // on, the rasteriser flips strokes from black to white but leaves
+    // the transparent regions alone — the editor can't preview that
+    // without a Konva.cache() pass, which Phase 5 ruled out for the
+    // live-editing path. We dim the icon to 50 % as a "this will
+    // render differently when sent" hint; PropertiesPanel explains.
     return (
       <KImage
         ref={setRef}
         {...common}
         image={img as unknown as HTMLImageElement}
-        width={im.w}
-        height={im.h}
-        opacity={im.invert ? 0.5 : 1}
+        width={ic.w}
+        height={ic.h}
+        opacity={ic.invert ? 0.5 : 1}
         onDblClick={onDblNonText}
         onDblTap={onDblNonText}
       />
     );
+  }
+
+  if (el.type === "image") {
+    return <ImageElementNode {...{ el, common, setRef, onDblNonText }} />;
   }
 
   if (el.type === "rect") {
@@ -660,6 +713,64 @@ function ElementNode({
     />
   );
   void isSelected;
+}
+
+interface ImageElementNodeProps {
+  el: ImageElement;
+  common: Record<string, unknown>;
+  setRef: (node: Konva.Node | null) => void;
+  onDblNonText: () => void;
+}
+
+/**
+ * Wraps the image-element render branch in its own component so it
+ * can call `useDitheredImagePreview` (hooks can't live inside a switch
+ * branch of a parent component). Falls back to the un-dithered source
+ * while the first preview pass debounces.
+ */
+function ImageElementNode({
+  el,
+  common,
+  setRef,
+  onDblNonText,
+}: ImageElementNodeProps): JSX.Element {
+  const sourceImage = getCachedImage(el.dataUrl);
+  const ditheredCanvas = useDitheredImagePreview(el);
+  const previewSource = ditheredCanvas ?? sourceImage;
+  if (!previewSource) {
+    return (
+      <KRect
+        ref={setRef}
+        {...common}
+        width={el.w}
+        height={el.h}
+        stroke="#bbb"
+        strokeWidth={1}
+        dash={[3, 3]}
+        fill="transparent"
+        onDblClick={onDblNonText}
+        onDblTap={onDblNonText}
+      />
+    );
+  }
+  // The dithered preview is already in panel-space (0/255 only) so it
+  // doesn't need the invert-tinting hint that the un-dithered fallback
+  // gets — what you see is what you'll send. The fallback (no preview
+  // yet) keeps the 50 % dim on invert so the user has *some* signal
+  // during the brief debounce window after a fresh upload.
+  const dimForFallbackInvert = !ditheredCanvas && el.invert;
+  return (
+    <KImage
+      ref={setRef}
+      {...common}
+      image={previewSource as unknown as HTMLImageElement}
+      width={el.w}
+      height={el.h}
+      opacity={dimForFallbackInvert ? 0.5 : 1}
+      onDblClick={onDblNonText}
+      onDblTap={onDblNonText}
+    />
+  );
 }
 
 interface LineEndpointsProps {

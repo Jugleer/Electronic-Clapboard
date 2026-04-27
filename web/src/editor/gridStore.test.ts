@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { clampGrid, snap } from "./gridStore";
+import {
+  clampBorder,
+  clampGrid,
+  DEFAULT_BORDER_WIDTH,
+  MAX_BORDER,
+  MIN_BORDER,
+  snap,
+} from "./gridStore";
 
 describe("snap", () => {
   it("returns the input unchanged when disabled", () => {
@@ -26,5 +33,28 @@ describe("clampGrid", () => {
     expect(clampGrid(0)).toBe(2);
     expect(clampGrid(99999)).toBe(200);
     expect(clampGrid(NaN)).toBe(10);
+  });
+});
+
+describe("clampBorder", () => {
+  it("treats anything ≤ 0 as off", () => {
+    expect(clampBorder(0)).toBe(0);
+    expect(clampBorder(-50)).toBe(0);
+    expect(clampBorder(NaN)).toBe(0);
+  });
+
+  it("snaps small positive values up to MIN_BORDER", () => {
+    expect(clampBorder(1)).toBe(MIN_BORDER);
+    expect(clampBorder(MIN_BORDER - 1)).toBe(MIN_BORDER);
+  });
+
+  it("clamps to MAX_BORDER and rounds floats", () => {
+    expect(clampBorder(MAX_BORDER + 1000)).toBe(MAX_BORDER);
+    expect(clampBorder(20.4)).toBe(20);
+    expect(clampBorder(20.6)).toBe(21);
+  });
+
+  it("default border width matches MIN_BORDER", () => {
+    expect(DEFAULT_BORDER_WIDTH).toBe(MIN_BORDER);
   });
 });

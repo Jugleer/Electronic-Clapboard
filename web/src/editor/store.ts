@@ -10,6 +10,8 @@
 
 import { create, type StoreApi, type UseBoundStore } from "zustand";
 
+import { HEIGHT, WIDTH } from "../frameFormat";
+import { useGridStore } from "./gridStore";
 import {
   defaultsFor,
   type Element,
@@ -101,6 +103,59 @@ const NUDGE_LARGE = 10;
 // negative for an upward / leftward segment. Other elements have a
 // strictly positive (w, h). The bbox helpers normalise so alignment
 // math works on every type without special-casing.
+/**
+ * Clamp an element's position and size so its bounding box stays
+ * inside the *outer* edge of the staging frame. The legal placement
+ * region is `[-border, WIDTH + border]` × `[-border, HEIGHT + border]`,
+ * where `border` is the gridStore's `borderWidth` (0 = no border, the
+ * frame itself is the boundary). Lines have their endpoints clamped
+ * independently; other elements have their bbox clamped, and a width
+ * or height larger than the legal region is shrunk to fit.
+ *
+ * Reads the current border width from `useGridStore` directly. This
+ * couples the editor store to the grid store but is cheap (a single
+ * synchronous read) and keeps the clamp helper a pure function of
+ * the input element.
+ */
+function currentBorder(): number {
+  if (typeof useGridStore.getState !== "function") return 0;
+  return Math.max(0, Math.round(useGridStore.getState().borderWidth));
+}
+
+export function clampToFrame(el: Element, border = currentBorder()): Element {
+  // `-0 || 0` normalises the signed zero JS produces from unary minus
+  // on 0 — without this, a `border = 0` clamp can return `-0` and
+  // surprise callers that use `Object.is`.
+  const minX = -border || 0;
+  const minY = -border || 0;
+  const maxX = WIDTH + border;
+  const maxY = HEIGHT + border;
+  if (el.type === "line") {
+    // Clamp both endpoints, recompute (x, y, w, h) from clamped points.
+    const x1 = clamp(el.x, minX, maxX);
+    const y1 = clamp(el.y, minY, maxY);
+    const x2 = clamp(el.x + el.w, minX, maxX);
+    const y2 = clamp(el.y + el.h, minY, maxY);
+    if (x1 === el.x && y1 === el.y && x2 === el.x + el.w && y2 === el.y + el.h) {
+      return el;
+    }
+    return { ...el, x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
+  // Non-line: shrink w/h first if they exceed the frame, then clamp x/y.
+  const maxW = maxX - minX;
+  const maxH = maxY - minY;
+  const w = Math.max(1, Math.min(el.w, maxW));
+  const h = Math.max(1, Math.min(el.h, maxH));
+  const x = clamp(el.x, minX, maxX - w);
+  const y = clamp(el.y, minY, maxY - h);
+  if (x === el.x && y === el.y && w === el.w && h === el.h) return el;
+  return { ...el, x, y, w, h };
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 function bboxLeft(el: Element): number {
   if (el.type === "line") return Math.min(el.x, el.x + el.w);
   return el.x;
@@ -187,7 +242,10 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
       addElement: (type, position, options) => {
         const id = nextId();
         commit((state) => {
-          const el: Element = { ...defaultsFor(type, position, options), id };
+          const el: Element = clampToFrame({
+            ...defaultsFor(type, position, options),
+            id,
+          });
           return { elements: [...state.elements, el], selectedIds: [id] };
         });
         return id;
@@ -260,7 +318,9 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
       moveElement: (id, position) =>
         commit((state) =>
           patchElement(state, id, (el) =>
-            el.locked ? null : { ...el, x: position.x, y: position.y },
+            el.locked
+              ? null
+              : clampToFrame({ ...el, x: position.x, y: position.y }),
           ),
         ),
 
@@ -268,13 +328,13 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
         commit((state) =>
           patchElement(state, id, (el) => {
             if (el.locked) return null;
-            return {
+            return clampToFrame({
               ...el,
               x: box.x,
               y: box.y,
               w: Math.max(1, box.w),
               h: Math.max(1, box.h),
-            };
+            });
           }),
         ),
 
@@ -290,7 +350,7 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
           const elements = state.elements.map((el) => {
             if (el.groupId !== groupId || el.locked) return el;
             mutated = true;
-            return { ...el, x: el.x + dx, y: el.y + dy };
+            return clampToFrame({ ...el, x: el.x + dx, y: el.y + dy });
           });
           return mutated ? { ...state, elements } : state;
         }),
@@ -371,13 +431,13 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
           for (const id of state.selectedIds) {
             const src = state.elements.find((e) => e.id === id);
             if (!src) continue;
-            const copy = {
+            const copy = clampToFrame({
               ...src,
               id: nextId(),
               x: src.x + 10,
               y: src.y + 10,
               locked: false,
-            };
+            });
             copies.push(copy);
             newIds.push(copy.id);
           }
@@ -402,7 +462,7 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
           const elements = state.elements.map((el) => {
             if (!ids.has(el.id) || el.locked) return el;
             mutated = true;
-            return { ...el, x: el.x + dx, y: el.y + dy };
+            return clampToFrame({ ...el, x: el.x + dx, y: el.y + dy });
           });
           return mutated ? { ...state, elements } : state;
         }),

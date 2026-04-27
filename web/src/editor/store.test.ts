@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createEditorStore, type EditorStore } from "./store";
+import { useGridStore } from "./gridStore";
+import { clampToFrame, createEditorStore, type EditorStore } from "./store";
 import { cssFontFamily } from "./types";
 import type { LineElement, RectElement, TextElement } from "./types";
 
@@ -580,5 +581,157 @@ describe("cssFontFamily", () => {
   it("falls back to sans-serif on empty input", () => {
     expect(cssFontFamily("")).toBe("sans-serif");
     expect(cssFontFamily("   ")).toBe("sans-serif");
+  });
+});
+
+describe("clampToFrame", () => {
+  // Restore the gridStore singleton's borderWidth between tests so
+  // these don't leak into the move/resize tests further up the file.
+  afterEach(() => {
+    useGridStore.setState({ borderWidth: 0 });
+  });
+
+  it("with border=0, keeps an in-frame element unchanged", () => {
+    const el: RectElement = {
+      id: "r",
+      type: "rect",
+      x: 100,
+      y: 100,
+      w: 80,
+      h: 60,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: false,
+      strokeWidth: 1,
+    };
+    expect(clampToFrame(el, 0)).toBe(el);
+  });
+
+  it("with border=0, clamps an element past the right/bottom edge", () => {
+    const el: RectElement = {
+      id: "r",
+      type: "rect",
+      x: 1000,
+      y: 600,
+      w: 80,
+      h: 60,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: false,
+      strokeWidth: 1,
+    };
+    const out = clampToFrame(el, 0);
+    expect(out.x).toBe(800 - 80);
+    expect(out.y).toBe(480 - 60);
+  });
+
+  it("with border=20, allows placement into the staging zone", () => {
+    const el: RectElement = {
+      id: "r",
+      type: "rect",
+      x: -15,
+      y: -15,
+      w: 30,
+      h: 30,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: false,
+      strokeWidth: 1,
+    };
+    expect(clampToFrame(el, 20)).toBe(el);
+  });
+
+  it("with border=20, blocks placement past the outer edge", () => {
+    const el: RectElement = {
+      id: "r",
+      type: "rect",
+      x: -50,
+      y: -50,
+      w: 30,
+      h: 30,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: false,
+      strokeWidth: 1,
+    };
+    const out = clampToFrame(el, 20);
+    expect(out.x).toBe(-20);
+    expect(out.y).toBe(-20);
+  });
+
+  it("shrinks an element wider than the legal region", () => {
+    const el: RectElement = {
+      id: "r",
+      type: "rect",
+      x: 0,
+      y: 0,
+      w: 9999,
+      h: 9999,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: false,
+      strokeWidth: 1,
+    };
+    const out = clampToFrame(el, 0);
+    expect(out.w).toBe(800);
+    expect(out.h).toBe(480);
+  });
+
+  it("clamps line endpoints independently", () => {
+    const line: LineElement = {
+      id: "l",
+      type: "line",
+      x: -100,
+      y: 200,
+      w: 1000,
+      h: 50,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      strokeWidth: 2,
+    };
+    const out = clampToFrame(line, 0) as LineElement;
+    expect(out.x).toBe(0);
+    expect(out.y).toBe(200);
+    expect(out.x + out.w).toBe(800);
+    expect(out.y + out.h).toBe(250);
+  });
+
+  it("moveElement reads the current border from the gridStore singleton", () => {
+    useGridStore.setState({ borderWidth: 20 });
+    const useStore2 = createEditorStore();
+    const id = useStore2.getState().addElement("rect", { x: 0, y: 0 });
+    useStore2.getState().moveElement(id, { x: -50, y: -50 });
+    const el = useStore2.getState().elements.find((e) => e.id === id)!;
+    // Allowed into the border zone (-20) but not past it.
+    expect(el.x).toBe(-20);
+    expect(el.y).toBe(-20);
+  });
+
+  it("nudgeSelected stops at the outer edge", () => {
+    const useStore2 = createEditorStore();
+    const id = useStore2.getState().addElement("rect", { x: 790, y: 0 });
+    useStore2.getState().selectElement(id);
+    // Default rect is 120 × 80; max x = 800 - 120 = 680. Element is at
+    // 790 already? clampToFrame at addElement clamps it back to 680.
+    expect(useStore2.getState().elements.find((e) => e.id === id)?.x).toBe(680);
+    // Nudging right is a no-op once it's at max-x.
+    useStore2.getState().nudgeSelected("right", true);
+    expect(useStore2.getState().elements.find((e) => e.id === id)?.x).toBe(680);
+  });
+
+  it("duplicateSelected places the +10/+10 copy inside the legal region", () => {
+    const useStore2 = createEditorStore();
+    const id = useStore2.getState().addElement("rect", { x: 670, y: 390 });
+    useStore2.getState().selectElement(id);
+    const [copyId] = useStore2.getState().duplicateSelected();
+    const copy = useStore2.getState().elements.find((e) => e.id === copyId)!;
+    expect(copy.x).toBeLessThanOrEqual(800 - copy.w);
+    expect(copy.y).toBeLessThanOrEqual(480 - copy.h);
   });
 });
