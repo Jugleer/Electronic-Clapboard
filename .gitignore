@@ -19,10 +19,13 @@
 # (negates *.bin above). oracle_frame.bin (Phase 0) pins the wire format;
 # clapper_hero.bin (Phase 3) pins the RGBA → threshold → pack glue;
 # icon_movie_64.bin (Phase 5) pins the icon-rasteriser output for the
-# canonical clapboard icon at 64×64 — the visual-regression snapshot.
+# canonical clapboard icon at 64×64 — the visual-regression snapshot;
+# fs_oracle_gradient.bin (Phase 6) pins our Floyd-Steinberg port to PIL
+# byte-for-byte on a 64×32 ramp+diagonal pattern.
 !web/src/__fixtures__/oracle_frame.bin
 !web/src/__fixtures__/clapper_hero.bin
 !web/src/__fixtures__/icon_movie_64.bin
+!web/src/__fixtures__/fs_oracle_gradient.bin
 
 # Tabler SVG download cache for tools/rasterise_icons.py — committed
 # PNG masters in web/public/icons/ are the build output.

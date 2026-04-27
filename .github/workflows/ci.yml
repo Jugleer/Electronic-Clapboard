@@ -29,6 +29,10 @@ jobs:
         run: |
           python tools/generate_oracle_fixture.py
           git diff --exit-code -- web/src/__fixtures__/oracle_frame.bin
+      - name: Verify FS dither oracle is up to date
+        run: |
+          python tools/generate_dither_oracle.py
+          git diff --exit-code -- web/src/__fixtures__/fs_oracle_gradient.bin
 
   # -----------------------------------------------------------------------
   # Firmware: native unit tests (host compiler), then ESP32-S3 build only.

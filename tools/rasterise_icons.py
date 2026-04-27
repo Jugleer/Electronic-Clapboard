@@ -1,19 +1,20 @@
-"""Vendor Tabler icons → 128×128 grayscale PNG masters in
+"""Vendor Tabler icons → 128×128 RGBA PNG masters in
 ``web/public/icons/<category>/<id>.png``.
 
-Run once at vendoring time (or whenever ``ICONS`` is edited). Network is
-required: SVG sources are fetched from the @tabler/icons CDN at the
+Run once at vendoring time (or whenever ``ICONS`` is edited). Network
+is required: SVG sources are fetched from the @tabler/icons CDN at the
 pinned version below and cached under ``tools/icons-cache/`` so reruns
 are offline-fast. The committed PNGs are what the editor actually uses
 at runtime; this script is only a "how to refresh" reference, not a CI
 step.
 
-Each Tabler outline SVG is composited over white and converted to ``L``
-(8-bit grayscale). Downstream the editor draws the PNG via 2D-context
-``drawImage`` (bilinear scale to placed size) and ``packFrame`` does
-threshold-binarisation. Pre-rasterising to a checked-in PNG sidesteps
-the SVG-rasteriser drift between browser Skia and @napi-rs/canvas
-(resvg) so the visual snapshot is reproducible.
+Each Tabler outline SVG is rasterised to an RGBA PNG with the original
+alpha preserved — strokes are black, the rest is fully transparent.
+The editor's render path reads alpha to decide whether each pixel
+contributes to the rasterised frame; transparent regions become paper.
+Pre-rasterising to a checked-in PNG sidesteps the SVG-rasteriser drift
+between browser Skia and @napi-rs/canvas (resvg) so the visual
+snapshot stays reproducible.
 
 Tabler Icons are MIT licensed (https://tabler.io/icons). The licence
 and the pinned vendor SHA are recorded in ``docs/icons.md``.
@@ -142,11 +143,11 @@ def rasterise(svg: bytes) -> Image.Image:
         output_height=MASTER_SIZE,
     )
     rgba = Image.open(BytesIO(png_bytes)).convert("RGBA")
-    # Composite over solid white so transparent regions become paper
-    # and stroked regions stay close to ink.
-    white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
-    flat = Image.alpha_composite(white, rgba).convert("L")
-    return flat
+    # Keep the original alpha channel — Tabler outline SVGs render as
+    # black strokes on a transparent canvas. The editor's drawIcon
+    # reads alpha to decide what's ink; whatever's transparent becomes
+    # paper at rasterise time.
+    return rgba
 
 
 def main() -> int:
@@ -158,7 +159,29 @@ def main() -> int:
         out_path = cat_dir / f"{name}.png"
         svg = fetch_svg(name)
         img = rasterise(svg)
-        img.save(out_path, format="PNG", optimize=True)
+        # Assert RGBA mode before save: drawIcon in the editor reads
+        # alpha to decide which pixels are stroke. An L-mode PNG (no
+        # alpha channel) decodes opaque-everywhere in the browser and
+        # renders as a solid black/white box. PIL's optimize=True is
+        # known to collapse RGBA→L when the RGB channels are all zero
+        # (the Tabler black-stroke case); plain save preserves RGBA.
+        if img.mode != "RGBA":
+            raise RuntimeError(
+                f"{name}: rasterise produced mode={img.mode}, expected RGBA. "
+                "drawIcon needs the alpha channel to distinguish stroke "
+                "from background.",
+            )
+        img.save(out_path, format="PNG")
+        # Re-open and verify so a downstream PNG-saver bug never
+        # silently writes a stripped file (PIL has done this before
+        # under optimize=True; this catch is the canary for any
+        # future regression).
+        verify = Image.open(out_path)
+        if verify.mode != "RGBA":
+            raise RuntimeError(
+                f"{out_path.name} written as mode={verify.mode}, expected "
+                "RGBA. The editor will render this icon as a solid box.",
+            )
         written += 1
         print(f"  wrote {out_path.relative_to(REPO_ROOT)} ({out_path.stat().st_size} B)")
     print(f"done -- {written} icons -> {OUT_ROOT.relative_to(REPO_ROOT)}")

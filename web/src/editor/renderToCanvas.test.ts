@@ -264,7 +264,7 @@ describe("rasterizeElements — icon", () => {
     expect(pixelAt(bytes, 600, 400)).toBe(0);
   });
 
-  it("invert flips ink/paper inside the bounding box", () => {
+  it("invert flips the stroke without filling the transparent surround", () => {
     const base: IconElement = {
       id: "i2",
       type: "icon",
@@ -280,12 +280,17 @@ describe("rasterizeElements — icon", () => {
     };
     const a = readBytes([base]);
     const b = readBytes([{ ...base, invert: true }]);
-    // Ink inside the box is dramatically different.
     const inkA = inkInBox(a, 200, 200, 64, 64);
     const inkB = inkInBox(b, 200, 200, 64, 64);
-    // Outline icon: relatively few ink pixels. Inverted: most pixels ink.
-    expect(inkA).toBeLessThan(64 * 64 / 2);
-    expect(inkB).toBeGreaterThan(64 * 64 / 2);
+    // Different bytes — the stroke pixels flipped colour.
+    expect(a).not.toEqual(b);
+    // Non-inverted: the stroke pixels are ink.
+    expect(inkA).toBeGreaterThan(20);
+    // Inverted: the strokes flip to paper. With the icon over the
+    // default white canvas, the panel ends up nearly all paper —
+    // the only ink would be from background elements beneath the
+    // icon, of which there are none here.
+    expect(inkB).toBe(0);
     // Outside the box, both are paper.
     expect(pixelAt(a, 100, 100)).toBe(0);
     expect(pixelAt(b, 100, 100)).toBe(0);
@@ -328,6 +333,85 @@ describe("rasterizeElements — icon", () => {
       };
       expect(() => readBytes([el])).not.toThrow();
     }
+  });
+
+  it("invert over a filled black rect produces a white-on-black silhouette", () => {
+    // The user's "invert" workflow: park a filled black rect, drop
+    // an inverted icon on top — the icon strokes flip to paper, the
+    // black rect shows through everywhere the icon was transparent,
+    // producing a white-stroke-on-black-background silhouette.
+    const rect: Element = {
+      id: "underlay",
+      type: "rect",
+      x: 200,
+      y: 200,
+      w: 80,
+      h: 80,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: true,
+      strokeWidth: 0,
+    };
+    const icon: IconElement = {
+      id: "icon-on-rect-inverted",
+      type: "icon",
+      x: 200,
+      y: 200,
+      w: 80,
+      h: 80,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      src: "film/movie",
+      invert: true,
+    };
+    const bytes = readBytes([rect, icon]);
+    const ink = inkInBox(bytes, 200, 200, 80, 80);
+    // Most of the bbox is the rect's ink showing through the icon's
+    // transparent regions; only the inverted strokes punch holes of
+    // paper. So ink count is high but strictly less than the full
+    // 80*80 = 6400 a bare rect would have.
+    expect(ink).toBeGreaterThan(80 * 80 * 0.5);
+    expect(ink).toBeLessThan(80 * 80);
+  });
+
+  it("transparent surround does not paint over content beneath the icon", () => {
+    // A filled black rect parked under the icon's bbox: any pixel
+    // that's transparent in the icon must still read as ink because
+    // the rect under it is black. This is the canary that catches
+    // accidental "fill the bbox with paper" regressions.
+    const rect: Element = {
+      id: "underlay",
+      type: "rect",
+      x: 200,
+      y: 200,
+      w: 80,
+      h: 80,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      filled: true,
+      strokeWidth: 0,
+    };
+    const icon: IconElement = {
+      id: "icon-on-rect",
+      type: "icon",
+      x: 200,
+      y: 200,
+      w: 80,
+      h: 80,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      src: "film/movie",
+      invert: false,
+    };
+    const bytes = readBytes([rect, icon]);
+    // A corner of the rect well outside any reasonable Tabler stroke
+    // should still be ink because the icon was transparent there.
+    expect(pixelAt(bytes, 202, 202)).toBe(1);
+    expect(pixelAt(bytes, 277, 277)).toBe(1);
   });
 
   it("cache miss leaves the footprint paper-coloured (no crash)", () => {

@@ -12,6 +12,11 @@
  */
 
 import { HEIGHT, WIDTH } from "../frameFormat";
+import {
+  applyBrightnessContrast,
+  floydSteinbergInPlace,
+  thresholdInPlace,
+} from "./dither";
 import { getCachedIcon } from "./icons/loader";
 import { getCachedImage } from "./imageCache";
 import { cssFontFamily } from "./types";
@@ -83,28 +88,49 @@ function drawIcon(ctx: CanvasRenderingContext2D, el: IconElement): void {
     // The interactive view shows the same blank, which is honest.
     return;
   }
+  // Icons are vendored as RGBA — strokes on a transparent canvas. We
+  // draw onto an element-sized temp canvas, then walk the pixels to
+  // convert each one into pure ink, pure paper, or transparent (so
+  // it falls through to whatever was beneath the icon). Without the
+  // pre-pass, packFrame's luminance threshold would treat
+  // transparent-RGB-zero pixels as ink and fill the bbox with black.
+  const w = Math.max(1, Math.round(el.w));
+  const h = Math.max(1, Math.round(el.h));
+  const tmp = document.createElement("canvas");
+  tmp.width = w;
+  tmp.height = h;
+  const tctx = tmp.getContext("2d");
+  if (!tctx) return;
   // `ctx.drawImage` accepts CanvasImageSource, which @napi-rs/canvas's
   // Image satisfies under test and HTMLImageElement satisfies in the
   // browser. The cast is the seam between the two.
-  ctx.drawImage(img as CanvasImageSource, el.x, el.y, el.w, el.h);
-  if (el.invert) {
-    // Invert ink/paper inside the bounding box only. `difference` against
-    // a black-filled rect of the same footprint flips the channels for
-    // every pixel that drawImage just wrote, leaving the rest of the
-    // canvas alone. Threshold-binarisation downstream then turns the
-    // (now ~white-on-black) silhouette into proper 1bpp ink.
-    ctx.save();
-    ctx.globalCompositeOperation = "difference";
-    ctx.fillStyle = "white";
-    ctx.fillRect(el.x, el.y, el.w, el.h);
-    ctx.restore();
+  tctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
+  const data = tctx.getImageData(0, 0, w, h);
+  const bytes = data.data;
+  // Alpha is the mask: anywhere the source had stroke ink, the alpha
+  // is opaque; the rest of the icon's bbox is transparent. Luminance
+  // is unreliable here because the Tabler scale-down adds anti-alias
+  // greys that produce surprising "halo" patterns when run through a
+  // luma threshold. Alpha-as-mask matches the user's mental model:
+  // `invert` flips the stroke ink itself, transparent regions stay
+  // transparent so whatever's beneath the icon shows through.
+  for (let i = 0; i < bytes.length; i += 4) {
+    const a = bytes[i + 3];
+    if (a < 128) {
+      bytes[i] = 0;
+      bytes[i + 1] = 0;
+      bytes[i + 2] = 0;
+      bytes[i + 3] = 0;
+      continue;
+    }
+    const v = el.invert ? 255 : 0;
+    bytes[i] = v;
+    bytes[i + 1] = v;
+    bytes[i + 2] = v;
+    bytes[i + 3] = 255;
   }
-}
-
-// Rec.709 luma — same coefficients packFrame uses, kept private so the
-// per-element pre-binarisation lines up with the global cutoff.
-function luma(r: number, g: number, b: number): number {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  tctx.putImageData(data, 0, 0);
+  ctx.drawImage(tmp, el.x, el.y, w, h);
 }
 
 function drawUserImage(
@@ -114,11 +140,13 @@ function drawUserImage(
   const img = getCachedImage(el.dataUrl);
   if (!img) return;
 
-  // Per-element threshold + invert is applied on a temporary canvas
-  // sized to the element so downstream rotation works the same way as
-  // every other element. We draw the source into the temp at element
-  // dimensions, binarise in-place, then composite onto the main
-  // canvas under whatever rotation was already pushed by the caller.
+  // The dither runs on a temp canvas sized to the element so the
+  // diffusion happens at the *output* resolution, not the source's
+  // native size. Resizing the element re-runs FS at the new size,
+  // which matches the user's expectation that "bigger element →
+  // visibly more dither detail". Re-running every send means we
+  // never cache stale dithered output across (algorithm, threshold,
+  // brightness, contrast) changes.
   const w = Math.max(1, Math.round(el.w));
   const h = Math.max(1, Math.round(el.h));
   const tmp = document.createElement("canvas");
@@ -128,19 +156,16 @@ function drawUserImage(
   if (!tctx) return;
   tctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
   const data = tctx.getImageData(0, 0, w, h);
-  const bytes = data.data;
-  const cutoff = el.threshold;
-  for (let i = 0; i < bytes.length; i += 4) {
-    const y = luma(bytes[i], bytes[i + 1], bytes[i + 2]);
-    // Pre-binarise to pure black/white so the downstream packFrame's
-    // global 128 cutoff round-trips this element verbatim.
-    const ink = el.invert ? y >= cutoff : y < cutoff;
-    const v = ink ? 0 : 255;
-    bytes[i] = v;
-    bytes[i + 1] = v;
-    bytes[i + 2] = v;
-    bytes[i + 3] = 255;
+
+  if (el.brightness !== 0 || el.contrast !== 0) {
+    applyBrightnessContrast(data, el.brightness, el.contrast);
   }
+  if (el.algorithm === "fs") {
+    floydSteinbergInPlace(data, el.invert);
+  } else {
+    thresholdInPlace(data, el.threshold, el.invert);
+  }
+
   tctx.putImageData(data, 0, 0);
   ctx.drawImage(tmp, el.x, el.y, w, h);
 }

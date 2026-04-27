@@ -145,6 +145,90 @@ describe("legacy v1 migration", () => {
   });
 });
 
+describe("phase 6 image-element migration", () => {
+  it("patches missing algorithm/brightness/contrast on legacy image elements", () => {
+    const ms = freshStorage();
+    // A pre-Phase-6 image element: no algorithm, brightness, contrast.
+    const legacyImage = {
+      id: "img1",
+      type: "image",
+      x: 0,
+      y: 0,
+      w: 100,
+      h: 100,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      dataUrl: "data:image/png;base64,abc",
+      threshold: 100,
+      invert: false,
+    };
+    ms.setItem(
+      "clapboard.layout.slots",
+      JSON.stringify({
+        schemaVersion: 2,
+        slots: [
+          {
+            name: "legacy",
+            savedAt: 1,
+            elements: [legacyImage],
+            thumbnail: null,
+          },
+          null,
+          null,
+        ],
+      }),
+    );
+    const slot = loadSlot(0);
+    const migrated = slot?.elements[0] as {
+      algorithm?: string;
+      brightness?: number;
+      contrast?: number;
+      threshold?: number;
+    };
+    // Legacy elements default to "threshold" so their existing
+    // appearance is preserved across the upgrade.
+    expect(migrated.algorithm).toBe("threshold");
+    expect(migrated.brightness).toBe(0);
+    expect(migrated.contrast).toBe(0);
+    expect(migrated.threshold).toBe(100);
+  });
+
+  it("leaves a fully-specified Phase 6 image element unchanged", () => {
+    const ms = freshStorage();
+    const phase6Image = {
+      id: "img1",
+      type: "image",
+      x: 0,
+      y: 0,
+      w: 100,
+      h: 100,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      dataUrl: "data:image/png;base64,abc",
+      algorithm: "fs",
+      threshold: 128,
+      brightness: 5,
+      contrast: -10,
+      invert: false,
+    };
+    ms.setItem(
+      "clapboard.layout.slots",
+      JSON.stringify({
+        schemaVersion: 2,
+        slots: [
+          { name: "fresh", savedAt: 1, elements: [phase6Image], thumbnail: null },
+          null,
+          null,
+        ],
+      }),
+    );
+    const slot = loadSlot(0);
+    expect(slot?.elements[0]).toEqual(phase6Image);
+  });
+});
+
 describe("quota guard", () => {
   it("surfaces a LayoutQuotaError when localStorage rejects a write", () => {
     const ms = freshStorage();

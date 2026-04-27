@@ -13,6 +13,15 @@
  * Schema v1 (legacy single slot under `clapboard.layout.default`) is
  * silently migrated into slot 0 the first time the v2 reader runs.
  *
+ * Phase 6 image-element migration: pre-Phase-6 image elements lack
+ * `algorithm`, `brightness`, and `contrast`. Rather than bumping
+ * to v3 (which would force a version-mismatch dialog on every Phase
+ * 5 saved layout — hostile UX for fields that have safe defaults),
+ * the v2 reader patches missing image-element fields on load. Old
+ * blobs see their threshold-only path preserved (algorithm defaults
+ * to "threshold" when threshold is present without algorithm),
+ * brightness/contrast default to 0 (no-op).
+ *
  * Quota: localStorage caps at ~5 MB per origin. Three slots × one
  * 800×480 image element ≈ comfortably inside, but a slot with several
  * heavy photos will tip it. `saveSlot` catches `QuotaExceededError`
@@ -20,7 +29,12 @@
  * clear a slot or delete uploads".
  */
 
-import type { Element } from "./types";
+import {
+  DEFAULT_IMAGE_BRIGHTNESS,
+  DEFAULT_IMAGE_CONTRAST,
+  type Element,
+  type ImageElement,
+} from "./types";
 
 export const LAYOUT_SCHEMA_VERSION = 2;
 export const SLOT_COUNT = 3;
@@ -85,7 +99,7 @@ function readRaw(): LayoutBlobV2 {
         blob.slots[0] = {
           name: "Default",
           savedAt: Date.now(),
-          elements: v1.elements,
+          elements: v1.elements.map(migrateElement),
           thumbnail: null,
         };
         // Best-effort: persist the migration so the legacy key can go.
@@ -127,8 +141,38 @@ export function parseBlob(raw: string): LayoutBlobV2 {
       `slots array has wrong length (expected ${SLOT_COUNT})`,
     );
   }
+  for (const slot of obj.slots) {
+    if (slot && Array.isArray(slot.elements)) {
+      slot.elements = slot.elements.map(migrateElement);
+    }
+  }
   return parsed as LayoutBlobV2;
 }
+
+/**
+ * Patch missing image-element fields added in Phase 6. Legacy
+ * Phase-5 ImageElements default to `algorithm: "threshold"` so their
+ * appearance doesn't shift on load; fresh elements created via
+ * `defaultsFor` use FS (the better default for new uploads).
+ */
+function migrateElement(el: Element): Element {
+  if (el.type !== "image") return el;
+  const partial = el as Partial<ImageElement> & Element;
+  if (
+    partial.algorithm !== undefined &&
+    partial.brightness !== undefined &&
+    partial.contrast !== undefined
+  ) {
+    return el;
+  }
+  return {
+    ...el,
+    algorithm: partial.algorithm ?? "threshold",
+    brightness: partial.brightness ?? DEFAULT_IMAGE_BRIGHTNESS,
+    contrast: partial.contrast ?? DEFAULT_IMAGE_CONTRAST,
+  };
+}
+
 
 function writeRaw(blob: LayoutBlobV2): void {
   if (typeof localStorage === "undefined") return;

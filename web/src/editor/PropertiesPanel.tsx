@@ -7,6 +7,7 @@ import {
   MAX_TEXT_SIZE,
   MIN_TEXT_SIZE,
   TEXT_SIZE_PRESETS,
+  type DitherAlgorithm,
   type FontFamily,
   type TextAlign,
   type VerticalAlign,
@@ -198,20 +199,70 @@ export function PropertiesPanel(): JSX.Element {
       ) : element.type === "image" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <label>
-            Threshold{" "}
+            Algorithm{" "}
+            <select
+              value={element.algorithm}
+              onChange={(e) =>
+                updateImage(element.id, {
+                  algorithm: e.target.value as DitherAlgorithm,
+                })
+              }
+            >
+              <option value="fs">Floyd-Steinberg</option>
+              <option value="threshold">Threshold</option>
+            </select>
+          </label>
+          {element.algorithm === "threshold" ? (
+            <label>
+              Threshold{" "}
+              <input
+                type="range"
+                min={1}
+                max={254}
+                step={1}
+                value={element.threshold}
+                onChange={(e) =>
+                  updateImage(element.id, { threshold: Number(e.target.value) })
+                }
+                style={{ width: 140 }}
+              />{" "}
+              <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
+                {element.threshold}
+              </span>
+            </label>
+          ) : null}
+          <label>
+            Brightness{" "}
             <input
               type="range"
-              min={1}
-              max={254}
+              min={-100}
+              max={100}
               step={1}
-              value={element.threshold}
+              value={element.brightness}
               onChange={(e) =>
-                updateImage(element.id, { threshold: Number(e.target.value) })
+                updateImage(element.id, { brightness: Number(e.target.value) })
               }
               style={{ width: 140 }}
             />{" "}
             <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
-              {element.threshold}
+              {element.brightness}
+            </span>
+          </label>
+          <label>
+            Contrast{" "}
+            <input
+              type="range"
+              min={-100}
+              max={100}
+              step={1}
+              value={element.contrast}
+              onChange={(e) =>
+                updateImage(element.id, { contrast: Number(e.target.value) })
+              }
+              style={{ width: 140 }}
+            />{" "}
+            <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
+              {element.contrast}
             </span>
           </label>
           <label>
@@ -223,8 +274,9 @@ export function PropertiesPanel(): JSX.Element {
             Invert
           </label>
           <div style={{ color: "#888", fontSize: 11 }}>
-            Threshold-only binarisation in v1; Floyd-Steinberg dither
-            arrives in Phase 6.
+            Preview shows the un-dithered source — click Send to see
+            the actual {element.algorithm === "fs" ? "Floyd-Steinberg" : "thresholded"}{" "}
+            output on the panel.
           </div>
         </div>
       ) : element.type === "icon" ? (
@@ -253,11 +305,13 @@ export function PropertiesPanel(): JSX.Element {
               checked={element.invert}
               onChange={(e) => updateIcon(element.id, { invert: e.target.checked })}
             />{" "}
-            Invert (white-on-black silhouette)
+            Invert ink
           </label>
           <div style={{ color: "#888", fontSize: 11 }}>
-            Preview shows a dimmed icon over a black backdrop when
-            inverted; the panel renders the silhouette directly.
+            Icons have transparent backgrounds — invert flips the
+            stroke from black to white without filling the surround.
+            Preview dims to 50% as a hint; click Send to see the
+            result on the panel.
           </div>
         </div>
       ) : element.type === "rect" ? (

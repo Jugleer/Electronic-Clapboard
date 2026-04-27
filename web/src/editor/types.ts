@@ -72,16 +72,26 @@ export interface IconElement extends BaseElement {
   invert: boolean;
 }
 
+export type DitherAlgorithm = "threshold" | "fs";
+
 export interface ImageElement extends BaseElement {
   type: "image";
-  // Base64-encoded data URL of the original upload. Phase 5 ships
-  // threshold-only binarisation; Phase 6 will add Floyd-Steinberg
-  // dither paths reading the same `dataUrl`.
+  // Base64-encoded data URL of the original upload. Re-rendered every
+  // send through the chosen `algorithm`; the editor preview shows the
+  // un-binarised source.
   dataUrl: string;
-  // Threshold cutoff in [0, 255]. 128 is centre-grey; lower → more
-  // ink, higher → more paper. Lets the user fine-tune contrast on a
-  // photo without re-uploading.
+  // Binarisation strategy. `"fs"` runs Floyd-Steinberg and matches
+  // PIL's reference output byte-for-byte; `"threshold"` is the
+  // simpler hard cut.
+  algorithm: DitherAlgorithm;
+  // Threshold cutoff in [0, 255], used only when `algorithm === "threshold"`.
+  // 128 is centre-grey; lower → more ink, higher → more paper.
   threshold: number;
+  // Pre-dither brightness/contrast adjustments, both in [-100, 100]
+  // and centred at 0 (= no-op). Applied to the RGBA buffer before
+  // grayscale + binarisation.
+  brightness: number;
+  contrast: number;
   // White-on-black inversion, same idiom as IconElement.invert.
   invert: boolean;
 }
@@ -118,6 +128,9 @@ export const DEFAULT_ICON_SIZE = 64;
 export const DEFAULT_ICON_SRC = "film/movie";
 export const DEFAULT_IMAGE_THRESHOLD = 128;
 export const DEFAULT_IMAGE_SIZE = 200;
+export const DEFAULT_IMAGE_ALGORITHM: DitherAlgorithm = "fs";
+export const DEFAULT_IMAGE_BRIGHTNESS = 0;
+export const DEFAULT_IMAGE_CONTRAST = 0;
 
 export function clampTextSize(n: number): TextSize {
   if (!Number.isFinite(n)) return DEFAULT_TEXT_SIZE;
@@ -154,7 +167,10 @@ export function defaultsFor(
       w: options.w ?? DEFAULT_IMAGE_SIZE,
       h: options.h ?? DEFAULT_IMAGE_SIZE,
       dataUrl: options.dataUrl ?? "",
+      algorithm: DEFAULT_IMAGE_ALGORITHM,
       threshold: DEFAULT_IMAGE_THRESHOLD,
+      brightness: DEFAULT_IMAGE_BRIGHTNESS,
+      contrast: DEFAULT_IMAGE_CONTRAST,
       invert: false,
     };
   }
