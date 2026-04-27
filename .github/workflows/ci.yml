@@ -20,14 +20,20 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Install system deps for cairosvg
+        run: sudo apt-get update && sudo apt-get install -y libcairo2
       - name: Install Python deps
-        run: pip install pytest pillow
+        run: pip install pytest pillow cairosvg
       - name: Run pytest
         run: pytest tools/test_frame_format.py -v
       - name: Verify oracle fixture is up to date
         run: |
           python tools/generate_oracle_fixture.py
           git diff --exit-code -- web/src/__fixtures__/oracle_frame.bin
+      - name: Verify icon PNGs match the rasterise script
+        run: |
+          python tools/rasterise_icons.py
+          git diff --exit-code -- web/public/icons/
 
   # -----------------------------------------------------------------------
   # Firmware: native unit tests (host compiler), then ESP32-S3 build only.
@@ -111,3 +117,15 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Bundle-size gate
+        # Trip if the JS bundle drifts past 600 KB raw. The icon
+        # PNGs in dist/icons/ are not bundled (they're served as
+        # static assets), so we measure dist/assets/ only.
+        run: |
+          BYTES=$(du -sb dist/assets | cut -f1)
+          MAX=614400
+          echo "JS bundle: $BYTES bytes (limit $MAX)"
+          if [ "$BYTES" -gt "$MAX" ]; then
+            echo "::error::JS bundle exceeds $MAX bytes — investigate before merging."
+            exit 1
+          fi
