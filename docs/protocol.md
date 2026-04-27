@@ -88,7 +88,38 @@ no difference.
 | Query (optional) | `?full=1` forces full refresh         |
 
 **Default refresh:** partial (faster, prone to ghosting after many updates).
-**`?full=1`:** full refresh that clears ghosting (~1–4 s on this panel).
+**`?full=1`:** full refresh that clears ghosting (~3.5 s synchronous + a deferred ~1.5 s partial-content lock-in pass; see "Deferred lock-in" below).
+
+#### Deferred lock-in (full refresh only)
+
+The 7.5" V2 panel runs a deep-refresh / VCOM-relaxation post-cycle after
+every full update which lifts ~500 mV of black saturation. Doing the
+full-window content pass and a saturation-restoring partial pass
+back-to-back inside the HTTP handler held the AsyncTCP task long enough
+to brownout / chip-reset the device on this board. The data plane
+therefore splits the full refresh into two phases:
+
+1. **Synchronous (in the request handler):** full-window all-white
+   pass (~3.5 s). The deep-refresh post-cycle runs against an empty
+   framebuffer (nothing to lift). The handler then sends the HTTP 200
+   response — its `render_ms` covers only this synchronous portion.
+2. **Deferred (in main `loop()` ~150 ms after the response):**
+   partial-window content pass (~1.5 s). The partial waveform does
+   NOT trigger the post-cycle, so blacks land at full saturation and
+   stay.
+
+While the deferred pass is in flight, `g_busy` remains true; concurrent
+`/frame` requests get `503 busy` and should rely on the §4 retry rules.
+The `/status` endpoint's `last_frame_render_ms` is updated *after* the
+deferred pass completes, so it carries the *combined* (white + partial)
+timing — the user-visible total. If `/status` is polled in the
+~1.5 s window between the 200 response and the deferred-pass finish,
+`last_frame_render_ms` reflects the *previous* successful frame's
+combined timing (this is intentional: the snapshot is updated atomically
+on completion).
+
+Partial requests (no `?full=1`) take a single synchronous pass and have
+no deferred phase.
 
 #### Response codes
 | Status | Meaning                                                        | Body                          |

@@ -92,32 +92,88 @@ USB_D+:  GPIO 20
 - Branch per feature, merge to `main`
 - Never commit secrets, WiFi credentials, or API keys
 
-## Repository structure (target)
+## Repository structure (current, post-Phase 4)
+
+The repo evolved from "single-firmware ESP32 project" into "ESP32
+firmware + browser editor", and split the firmware into a typewriter
+canary plus a frame-sink network firmware. Two parallel PlatformIO envs
+build them side-by-side, plus a `[env:native]` for pure-logic unit
+tests. The Vite/React editor lives under `web/`.
+
 ```
 electronic-clapboard/
 ├── CLAUDE.md                  # This file
-├── README.md                  # Project overview and build instructions
-├── platformio.ini             # PlatformIO build config
+├── README.md                  # Build + bench setup instructions
+├── platformio.ini             # 3 envs: esp32s3 (typewriter), esp32s3-net, native
+├── partitions/                # Custom 16 MB partition table
 ├── docs/
-│   ├── wiring-guide.md        # Breadboard wiring instructions (phased)
-│   ├── bom.md                 # Bill of materials
-│   └── architecture.md        # Software architecture notes
+│   ├── phased-build-plan.md   # The roadmap; phase notes are load-bearing
+│   ├── protocol.md            # HTTP wire contract (frame format, /status, etc.)
+│   ├── wiring-guide.md        # Breadboard wiring (Phase 0)
+│   └── bom.md                 # Bill of materials
 ├── include/
-│   └── config.h               # Pin definitions, constants, thresholds (shared between src/ and test/)
-├── src/
-│   ├── main.cpp               # Entry point, setup/loop
-│   ├── display.h / .cpp       # E-paper driver wrapper
-│   ├── sync.h / .cpp          # LED + solenoid firing logic
-│   ├── input.h / .cpp         # Keyboard input handling
-│   ├── battery.h / .cpp       # Voltage monitoring
-│   └── state_machine.h / .cpp # Core state machine
-├── lib/                       # Local PlatformIO libraries (empty for now)
-├── test/
-│   ├── test_state_machine/
-│   ├── test_battery/
-│   └── test_sync/
+│   ├── config.h               # Pin definitions, constants, thresholds
+│   ├── secrets.h              # Wi-Fi credentials (gitignored)
+│   └── secrets.h.example      # Template for new contributors
+├── src/                       # Firmware
+│   ├── main.cpp               # Typewriter demo (Phase 3 of original build) — canary
+│   ├── main_net.cpp           # Phase 2+ entry: setup() / loop() for network firmware
+│   ├── net.{h,cpp}            # Wi-Fi STA, mDNS, HTTP server lifecycle
+│   ├── frame.{h,cpp}          # POST /frame handler + deferred-lockin orchestrator
+│   ├── frame_validate.{h,cpp} # Pure validation helpers (linked into [env:native])
+│   ├── lockin_state.h         # Pure deferred-lockin state machine (header-only)
+│   ├── display.{h,cpp}        # GxEPD2 wrapper; draw_partial_content / draw_full_white / show_boot_screen
+│   ├── status_json.{h,cpp}    # /status JSON builder (linked into [env:native])
+│   ├── log_ring.{h,cpp}       # 8 KB ring buffer for log tee
+│   ├── log_server.{h,cpp}     # AsyncTCP listener on :23 streaming the ring
+│   └── clap_log.{h,cpp}       # printf-style logger that tees Serial + ring
+├── tools/
+│   ├── frame_format.py        # Python wire-format mirror; oracle for cross-language equivalence
+│   ├── generate_oracle_fixture.py  # Regenerates web/src/__fixtures__/oracle_frame.bin
+│   ├── generate_slides.py     # Legacy slide art used by the typewriter demo
+│   └── dump_slide.py          # Pack a slide via frame_format and bench-flash it
+├── web/                       # Browser editor (Phase 3+)
+│   ├── package.json           # Pinned versions (Phase 0 implementation note 3)
+│   ├── vite.config.ts         # node test environment; per-file jsdom for canvas tests
+│   ├── src/
+│   │   ├── App.tsx            # Top-level wiring; status + send button + grid controls
+│   │   ├── frameFormat.ts     # JS/TS mirror of tools/frame_format.py
+│   │   ├── packFrame.ts       # ImageData → 1bpp MSB bytes (threshold-only)
+│   │   ├── sendFrame.ts       # POST /frame with §4 retry semantics
+│   │   ├── useFrameSink.ts    # React hook around sendFrame + packFrame
+│   │   ├── config.ts          # Host resolution: localStorage > env > default
+│   │   ├── editor/
+│   │   │   ├── types.ts                # Element model + cssFontFamily helper
+│   │   │   ├── store.ts                # Zustand store with undo middleware
+│   │   │   ├── gridStore.ts            # Snap/grid view-state (own zustand instance)
+│   │   │   ├── EditorCanvas.tsx        # Konva stage with Transformer + line endpoints
+│   │   │   ├── TextEditorOverlay.tsx   # HTML <textarea> overlaid on Konva.Text
+│   │   │   ├── Toolbar.tsx             # Add-element buttons
+│   │   │   ├── HistoryButtons.tsx      # Undo/redo/duplicate
+│   │   │   ├── GroupButtons.tsx        # Group/ungroup
+│   │   │   ├── GridControls.tsx        # Snap toggle, grid visibility, spacing
+│   │   │   ├── LayerPanel.tsx          # Hierarchical: groups with nested members
+│   │   │   ├── PropertiesPanel.tsx     # Per-element styling
+│   │   │   ├── renderToCanvas.ts       # Pure 2D-context rasteriser for the send path
+│   │   │   ├── useKeyboard.ts          # Document-level shortcut wiring
+│   │   │   ├── useSystemFonts.ts       # Local Font Access API (Chromium)
+│   │   │   ├── testSetup.ts            # @napi-rs/canvas polyfill for jsdom tests
+│   │   │   └── __fixtures__/...
+│   │   └── __fixtures__/      # Cross-language oracle fixtures (binary)
+├── test/                      # Native (host-side) Unity tests via [env:native]
+│   ├── test_state_machine/    # Original demo state machine
+│   ├── test_battery/          # Voltage threshold logic
+│   ├── test_sync/             # LED/solenoid pulse logic
+│   ├── test_status_json/      # /status response shape contract
+│   ├── test_log_ring/         # 8 KB ring buffer drop-oldest semantics
+│   ├── test_frame_validate/   # POST /frame size/content-type/query parsing
+│   └── test_lockin_state/     # Deferred-lockin state machine (Phase 4)
+├── lib/                       # Local PlatformIO libraries (empty)
 └── .claude/
     └── commands/
-        ├── commit.md           # /commit — audit + test + commit
-        └── audit.md            # /audit — code review
+        ├── commit.md          # /commit — audit + test + commit
+        └── audit.md           # /audit — code review
 ```
+
+**Conventions:** `web:` is a valid commit prefix in addition to the
+firmware ones (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `hw:`).

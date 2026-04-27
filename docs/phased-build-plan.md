@@ -688,6 +688,231 @@ sign-off and is recorded inline below when it lands.
 ### Hand-off
 The editor is genuinely useful for text + boxes. A user could make a real slate with just this.
 
+### Phase 4 implementation notes (read me before Phase 5+)
+
+Phase 4 grew well past the original "What lands" list — text/rect/line
+primitives shipped, but so did rotation handles, custom font sizing
+(6–240 px), bold/italic, vertical alignment, system-font enumeration,
+multi-select with marquee + axis-lock-on-drag, undo/redo, duplicate,
+group/ungroup with isolation hierarchy in the layer panel, snap-to-grid
+with grid overlay, plus a firmware change to handle full-refresh
+saturation correctly via deferred lock-in. Notes are organised by area;
+bench gate H records the post-Phase-4 state.
+
+#### Editor library + state management
+1. **Editor library: react-konva 18.2.14 + konva 10.2.5.** Phase 3 note 4
+   paper-narrowed to react-konva. The hands-on jank check was folded
+   into the *first vertical slice* of Phase 4 — single text element +
+   Transformer + drag/resize/edit — rather than a separate throwaway
+   spike. react-konva 19 was rejected because it requires React 19;
+   we're on 18.3.1.
+
+2. **State management: Zustand 5.0.12.** Resolved the Phase 0 deferral.
+   `createEditorStore()` factory returns a fresh store per call so
+   `store.test.ts` is fully isolated; the app uses one module-level
+   instance. A *second* zustand store
+   ([web/src/editor/gridStore.ts](../web/src/editor/gridStore.ts))
+   holds grid/snap preferences — this state is view-only and persists
+   to localStorage; keeping it out of the editor store means
+   undo/redo doesn't churn on grid-toggle.
+
+3. **Undo/redo via a `commit()` middleware in the store, not Zustand
+   middleware proper.** Every mutating action wraps its `set` call in
+   `commit(mutator)`; the wrapper compares the before/after `elements`
+   reference and pushes a snapshot onto a 100-entry stack only when
+   elements actually changed. Selection-only changes are not undoable
+   (matches Figma/Sketch convention). The undo/redo stacks live in
+   plain module-scope arrays, *not* in zustand state, so they don't
+   trigger re-renders of every component subscribed to the store.
+   Trade-off: `canUndo() / canRedo()` are functions, not values, and
+   need a re-render trigger to update. The history toolbar reads
+   `elements` and `selectedIds` slices to piggy-back on existing
+   re-render triggers — adequate in practice.
+
+#### Render path
+4. **Render-path decoupling: pure 2D-context rasteriser, NOT
+   `stage.toCanvas()`.** [web/src/editor/renderToCanvas.ts](../web/src/editor/renderToCanvas.ts)
+   is a pure function over the store's element list that draws to a
+   detached `document.createElement("canvas")` using vanilla 2D
+   context primitives. Konva is *only* the interactive view. The
+   send pipeline can never accidentally include selection handles or
+   hover outlines (canary test in `renderToCanvas.test.ts`). Konva
+   text and `ctx.fillText` share the OS font stack but baselines can
+   drift slightly — sub-pixel below the threshold-binarisation noise
+   floor.
+
+5. **Vitest: per-file `// @vitest-environment jsdom` pragma, NOT a
+   global switch.** 55 of 101 tests are pure logic; the global flip
+   would be wasteful. Only
+   [renderToCanvas.test.ts](../web/src/editor/renderToCanvas.test.ts)
+   opts in via the pragma and imports `testSetup.ts` to polyfill
+   `HTMLCanvasElement.prototype.getContext("2d")` against
+   @napi-rs/canvas (Skia, prebuilt Windows binaries — no Cairo/MSYS2).
+
+#### Element-specific gotchas
+6. **Lines: separate-handle endpoints, NOT a Transformer-resized
+   bbox.** A Konva Transformer attached to a line's bbox collapses
+   for axis-aligned segments (zero-height bounds) and resizes
+   strangely off-axis. Phase 4 instead renders two `<KCircle>`
+   anchors at `(x,y)` and `(x+w, y+h)` when a single line is
+   selected, dragging each independently. The Transformer is
+   suppressed for line elements entirely.
+
+7. **Rotation pivot: top-left of the element**, matching Konva's
+   default. The 2D rasteriser applies `translate(x,y) → rotate →
+   translate(-x,-y)` so the canvas pre-render and the Konva preview
+   agree. Snap-to-rotation at 45° increments via `rotationSnaps`.
+
+8. **Text editing: HTML `<textarea>` overlay** at the element's screen
+   position, scaled by the stage's `scaleX()` so a future zoom feature
+   doesn't break it. While editing, Konva.Text renders empty so
+   glyphs don't double up. Enter commits, Shift+Enter newline, Esc
+   cancels. Default new-text size **24 px**; sizes are free-form
+   in [6, 240] with presets 12/16/24/36/48/64/96 in a `<datalist>`.
+
+9. **Bold/italic compose into Konva's `fontStyle` prop.** The
+   2D-context path uses the CSS shorthand `${italic} ${bold} ${size}px ${family}`.
+
+10. **System fonts via `window.queryLocalFonts()`** (Local Font
+    Access API; Chromium-only, behind a permission prompt). Fallback
+    is a free-text input — any installed family resolves at render
+    time even without enumeration.
+    [web/src/editor/useSystemFonts.ts](../web/src/editor/useSystemFonts.ts).
+
+#### Multi-select, grouping, isolation
+11. **Selection model: array of ids (`selectedIds`)**, not a single
+    id. Marquee-drag on blank canvas selects every element whose AABB
+    intersects the marquee rect; Shift+click toggles individual ids.
+
+12. **Groups travel together because the canvas drag handler applies
+    a single integer `(dx, dy)` to every co-grouped/co-selected
+    element.** A previous bug had each mover snapping independently
+    to the grid, which drifted the relative geometry. Now: snap the
+    *dragged* element's target, compute one integer delta, apply to
+    every mover. Konva's `node.x()` returns floats; we
+    `Math.round` on drag-end before reading. See
+    [EditorCanvas.tsx](../web/src/editor/EditorCanvas.tsx)
+    `computeMovers()` and `onDragEnd`.
+
+13. **Group isolation = "enter the group to edit members
+    individually".** Double-click a grouped element on the canvas
+    (or its layer-panel row) to set `isolatedGroupId`; while
+    isolated, clicks select members one at a time, and double-click
+    on text in isolation triggers text editing. Click outside the
+    group, click the layer-panel header again, or Esc/clearSelection
+    exits isolation. See `selectElement` / `selectMany` /
+    `isolateGroup` in [store.ts](../web/src/editor/store.ts).
+
+14. **Layer panel is hierarchical.** Groups render as headers (thick
+    left border, "Group N — editing" badge when isolated), members
+    as nested rows (thin border, 22 px indent). Group numbering is
+    stable to first-creation order. See [LayerPanel.tsx](../web/src/editor/LayerPanel.tsx)'s
+    `buildRows()`.
+
+#### Snap-to-grid
+15. **Grid is a separate `<Layer>` with `listening:false`** beneath
+    the elements layer. It NEVER appears in the rasterised bytes
+    because the rasteriser is decoupled from Konva (note 4). The
+    grid renders intersection dots via a Konva.Shape `sceneFunc` —
+    fast even at 4 px spacing on 800×480 (~24 000 dots).
+
+16. **Snap is applied at every commit point**: drag-end of any
+    element body, line endpoint drags, Transformer resizes (x/y/w/h
+    snap independently). Snap is **off by default** to avoid
+    surprising long-time editing flows.
+
+#### Firmware: deferred-lockin saturation
+17. **Full-refresh on the 7.5" V2 panel = synchronous all-white
+    full pass + deferred partial-content pass.** The panel runs a
+    deep-refresh / VCOM-relaxation post-cycle after every full
+    update which lifts ~500 mV of black saturation. Doing both
+    passes synchronously held the AsyncTCP task for ~6 s and reset
+    the chip (visible as a flash + boot screen mid-render). Splitting:
+    - Sync, in the request handler: `display::draw_full_white()` on
+      [src/display.cpp](../src/display.cpp) — full-window all-white
+      pass (~3.5 s). The post-cycle has nothing to lift.
+    - HTTP 200 response sent. `g_busy` stays *true*.
+    - Deferred, in `loop()` ~150 ms later via
+      [src/lockin_state.h](../src/lockin_state.h)'s state machine:
+      `display::draw_partial_content(buf)` — partial-window pass
+      (~1.5 s) that paints the actual image. Partial does NOT
+      trigger the post-cycle, so blacks land at full saturation and
+      stay.
+    - `g_busy` clears; `last_frame_render_ms` updates atomically with
+      the *combined* timing. See
+      [docs/protocol.md](protocol.md) §2.1 "Deferred lock-in".
+
+18. **`lockin_state.h` is header-only and pure C++** so it compiles
+    into both `[env:esp32s3-net]` and `[env:native]` without
+    Arduino/GxEPD2/AsyncWebServer pulled in. The state machine
+    (`Idle` ↔ `Pending`) lives apart from the SPI work; the latter
+    stays in [src/display.cpp](../src/display.cpp). Native test
+    [test/test_lockin_state/](../test/test_lockin_state/) covers
+    schedule/poll/finalize transitions, the SETTLE_MS gate, idempotent
+    polling, re-scheduling, and `millis()` rollover safety
+    (17 cases).
+
+19. **Boot screen** painted in [src/display.cpp](../src/display.cpp)'s
+    `show_boot_screen(fw, ip, host)` after Wi-Fi associates (best
+    effort — 8 s wait, falls back to `0.0.0.0` so firmware version
+    is at least visible). Uses GxEPD2's built-in 5×7 bitmap font at
+    sizes 6× / 3× / 2× — large, no antialiasing, totally readable.
+    Survives subsequent partial-refresh updates; the next `/frame`
+    POST overwrites it.
+
+20. **Editor surfaces deferred-lockin to the user.** After a
+    `?full=1` 200 response, App.tsx kicks a 1.8 s "panel locking in
+    saturation…" hint. Underestimates are covered by sendFrame's 503
+    retry; overestimates fade away naturally. See
+    [web/src/App.tsx](../web/src/App.tsx).
+
+21. **`firmware_version` bumped to 0.2.3** for Phase 4. The path was
+    0.2.0 (Phase 2/3) → 0.2.1 (boot screen) → 0.2.2 (first
+    saturation attempt, reverted) → 0.2.3 (deferred lock-in landed).
+    `[env:esp32s3]` typewriter canary still builds.
+
+#### Bench acceptance — Gate H, post-Phase-4 (run on hardware after merge)
+- Gate A — primitives end-to-end: rect/line/24 px-and-48 px text;
+  drag, resize, rotate; send. ✓
+- Gate B — full-refresh toggle: panel goes white (full pass) →
+  content paints (partial pass) → stays at full saturation
+  indefinitely; "panel locking in saturation…" hint fires for
+  ~1.8 s. ✓
+- Gate C — layer order: stack filled rect over text, reorder via
+  layer panel up/dn, send, occlusion correct. ✓
+- Gate D — keyboard: arrow nudge ±1 px / shift-arrow ±10 px;
+  Delete; arrow keys ignored while a textarea has focus. ✓
+- Gate E — locked element: lock-then-resize doesn't drift the
+  element's position back. Lock-then-delete refused. ✓
+- Gate F — text editing: dbl-click → textarea overlay; Enter
+  commits, Shift+Enter newline, Esc cancels. Multi-line on panel. ✓
+- Gate G — round-trip latency: ~5 s partial, ~5–6 s full
+  (synchronous portion ~3.5 s + ~1.5 s deferred). Editor 10 s
+  budget no longer at risk. ✓
+- **Gate H — Phase 4 additions:**
+  - Multi-select: marquee-drag, Shift+click, Ctrl+A.
+  - Group/ungroup: Ctrl+G / Ctrl+Shift+G; double-click member
+    enters isolation; layer panel hierarchy correct.
+  - Snap-to-grid: spacing 10 px, drag → coords land on grid.
+  - Undo/redo: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z; selection changes
+    don't enter history.
+  - Duplicate: Ctrl+D produces +10/+10 copy, copies unlocked.
+  - Axis-lock-on-drag: Shift while dragging.
+  - System fonts (Chromium): "Load system fonts" → permission
+    prompt → font-family input lists all installed families.
+  - Boot screen: power-cycle → splash with `firmware 0.2.3`,
+    hostname, IP. ✓
+
+#### Test totals after Phase 4
+- **vitest: 101 cases** across 7 files (gridStore 4, store 52,
+  renderToCanvas 10, plus the 35 carried from Phase 3).
+- **Native Unity: 67 cases** across 7 test programs (50 from
+  earlier phases + 17 new in `test_lockin_state`).
+- `npm run typecheck`, `npm run lint`, `npm run build`
+  (≈460 KB / 145 KB gz with Konva + react-konva): green.
+- `pio run -e esp32s3-net` and `pio run -e esp32s3` (typewriter
+  canary): both build clean.
+
 ---
 
 ## Phase 5 — Icon library
