@@ -28,7 +28,25 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 
 **In:** Wi-Fi (STA mode, mDNS as `clapboard.local`), HTTP `/frame` + `/sync` + `/status` endpoints, browser editor with text boxes / shape primitives / icon library / image upload + dithering, save/load layouts in browser storage. Wi-Fi creds via gitignored `secrets.h`.
 
-**Out (deferred to v2+):** AP-mode captive portal, NVS-backed Wi-Fi creds, mobile UI, undo/redo, freehand drawing, multi-page templates, live preview while typing, diff frames.
+**Out (deferred to v2+):** AP-mode captive portal, NVS-backed Wi-Fi creds, mobile UI, freehand drawing, multi-page templates, live preview while typing, diff frames.
+
+## Phase status
+
+| Phase | Slice                                                | Status      | Landed     |
+| ----- | ---------------------------------------------------- | ----------- | ---------- |
+| 0     | Foundations and contract freeze                       | ✅ done     | 2026-04-26 |
+| 1     | ESP32: Wi-Fi, mDNS, `/status`                         | ✅ done     | 2026-04-27 |
+| 2     | `/frame` POST → e-paper render — **keystone**         | ✅ done     | 2026-04-27 |
+| 3     | Frontend skeleton: Vite app, canvas, hardcoded send   | ✅ done     | 2026-04-27 |
+| 4     | Editor primitives: text/rect/line, groups, snap, undo | ✅ done     | 2026-04-27 |
+| 5     | Icon library                                          | ⏳ next     | —          |
+| 6     | Image upload with client-side dithering               | ⏳ planned  | —          |
+| 7     | Layout save/load (and `/sync` if hardware ready)      | ⏳ planned  | —          |
+
+**Firmware version:** `0.2.3` (Phase 4). **Test totals:** 101 vitest cases
+across 7 files, 67 native Unity cases across 7 programs, both firmware
+envs build clean. **Bundle:** ~463 KB (145 KB gz) — Konva + react-konva
+account for most of it; revisit before Phase 5 adds icon assets.
 
 ---
 
@@ -664,7 +682,7 @@ sign-off and is recorded inline below when it lands.
 
 ---
 
-## Phase 4 — Editor primitives: text boxes and shape tools
+## Phase 4 — Editor primitives: text boxes and shape tools ✅ **landed 2026-04-27**
 
 **Slice delivered:** The canvas is interactive. Click to place a text box, type into it, drag to move, resize handles. Shape primitives: rectangle, line, filled box. Layer panel showing each element. No persistence yet, no icons yet, no image upload yet.
 
