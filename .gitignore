@@ -15,8 +15,11 @@
 *.hex
 *.map
 
-# Cross-language oracle fixture is checked-in on purpose (negates *.bin above).
+# Cross-language and canvas-glue oracle fixtures are checked-in on purpose
+# (negates *.bin above). oracle_frame.bin (Phase 0) pins the wire format;
+# clapper_hero.bin (Phase 3) pins the RGBA → threshold → pack glue.
 !web/src/__fixtures__/oracle_frame.bin
+!web/src/__fixtures__/clapper_hero.bin
 
 # IDE / OS cruft
 .idea/
