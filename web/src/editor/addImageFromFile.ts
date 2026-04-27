@@ -29,6 +29,12 @@ function readAsDataUrl(file: File): Promise<string> {
 
 export interface AddImageOptions {
   position?: { x: number; y: number };
+  /** "fit": scale into 60% of the frame, centered (default).
+   *  "background": fit-cover the entire 800×480 frame, push to the
+   *  bottom of the layer stack so the user's other elements draw on
+   *  top of it.
+   */
+  mode?: "fit" | "background";
 }
 
 export async function addImageFromFile(
@@ -42,23 +48,48 @@ export async function addImageFromFile(
   const img = (await preloadImage(dataUrl)) as
     | { width?: number; height?: number }
     | undefined;
-  // Fit the upload into the frame with a margin.
   const naturalW = img?.width ?? WIDTH * MAX_FRACTION;
   const naturalH = img?.height ?? HEIGHT * MAX_FRACTION;
-  const scale = Math.min(
-    (WIDTH * MAX_FRACTION) / naturalW,
-    (HEIGHT * MAX_FRACTION) / naturalH,
-    1,
-  );
-  const w = Math.max(8, Math.round(naturalW * scale));
-  const h = Math.max(8, Math.round(naturalH * scale));
-  const position = options.position ?? {
-    x: Math.round((WIDTH - w) / 2),
-    y: Math.round((HEIGHT - h) / 2),
-  };
-  return useEditorStore
-    .getState()
-    .addElement("image", position, { dataUrl, w, h });
+
+  const mode = options.mode ?? "fit";
+  let w: number;
+  let h: number;
+  let position: { x: number; y: number };
+  if (mode === "background") {
+    // Fit-cover: scale so the smaller axis matches the frame, the
+    // larger axis overflows by a few pixels — same idea as
+    // background-size: cover. The element bounds may exceed the
+    // 800×480 viewport; that's fine, the rasteriser clips on the
+    // composite.
+    const scale = Math.max(WIDTH / naturalW, HEIGHT / naturalH);
+    w = Math.round(naturalW * scale);
+    h = Math.round(naturalH * scale);
+    position = options.position ?? {
+      x: Math.round((WIDTH - w) / 2),
+      y: Math.round((HEIGHT - h) / 2),
+    };
+  } else {
+    const scale = Math.min(
+      (WIDTH * MAX_FRACTION) / naturalW,
+      (HEIGHT * MAX_FRACTION) / naturalH,
+      1,
+    );
+    w = Math.max(8, Math.round(naturalW * scale));
+    h = Math.max(8, Math.round(naturalH * scale));
+    position = options.position ?? {
+      x: Math.round((WIDTH - w) / 2),
+      y: Math.round((HEIGHT - h) / 2),
+    };
+  }
+
+  const store = useEditorStore.getState();
+  const id = store.addElement("image", position, { dataUrl, w, h });
+  if (mode === "background") {
+    // Send to the bottom of the z-stack so any existing text/shapes
+    // remain readable on top of the photo.
+    store.reorderLayer(id, "bottom");
+  }
+  return id;
 }
 
 // Exposed for tests that don't go through FileReader.

@@ -23,6 +23,7 @@ export function App() {
   const stageRef = useRef<Konva.Stage | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const bgInputRef = useRef<HTMLInputElement | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [host, setHost] = useState<string>(() => resolveDefaultHost());
   const [fullRefresh, setFullRefresh] = useState(false);
@@ -31,17 +32,18 @@ export function App() {
   const { status, error, lastResult, send } = useFrameSink({ host });
   const elementCount = useEditorStore((s) => s.elements.length);
 
-  const onPickFile: React.ChangeEventHandler<HTMLInputElement> = async (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    try {
-      await addImageFromFile(file);
-      setImageError(null);
-    } catch (err) {
-      setImageError(err instanceof Error ? err.message : String(err));
-    }
-  };
+  const onPickFile = (mode: "fit" | "background"): React.ChangeEventHandler<HTMLInputElement> =>
+    async (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      try {
+        await addImageFromFile(file, { mode });
+        setImageError(null);
+      } catch (err) {
+        setImageError(err instanceof Error ? err.message : String(err));
+      }
+    };
 
   const onCanvasDrop: React.DragEventHandler<HTMLDivElement> = async (e) => {
     e.preventDefault();
@@ -179,7 +181,22 @@ export function App() {
               ref={fileInputRef}
               type="file"
               accept="image/*"
-              onChange={onPickFile}
+              onChange={onPickFile("fit")}
+              style={{ display: "none" }}
+            />
+            <button
+              type="button"
+              onClick={() => bgInputRef.current?.click()}
+              style={{ padding: "6px 12px", fontSize: 14 }}
+              title="Upload a PNG or JPG to fill the canvas as a background layer"
+            >
+              + Background
+            </button>
+            <input
+              ref={bgInputRef}
+              type="file"
+              accept="image/*"
+              onChange={onPickFile("background")}
               style={{ display: "none" }}
             />
             <HistoryButtons />

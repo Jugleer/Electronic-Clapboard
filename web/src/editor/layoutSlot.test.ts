@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
-  clearDefaultLayout,
-  hasDefaultLayout,
+  clearSlot,
+  LayoutQuotaError,
   LayoutSchemaError,
-  loadDefaultLayout,
-  parseLayout,
-  saveDefaultLayout,
-  serializeLayout,
+  listSlots,
+  loadSlot,
+  parseBlob,
+  renameSlot,
+  saveSlot,
+  SLOT_COUNT,
 } from "./layoutSlot";
 import { defaultsFor, type Element } from "./types";
 
@@ -22,10 +24,20 @@ function freshElements(): Element[] {
 
 class MockStorage {
   store = new Map<string, string>();
+  quotaBytes = Infinity;
   getItem(k: string) {
     return this.store.has(k) ? (this.store.get(k) as string) : null;
   }
   setItem(k: string, v: string) {
+    let total = v.length;
+    for (const [key, value] of this.store) {
+      if (key !== k) total += value.length;
+    }
+    if (total > this.quotaBytes) {
+      const err = new Error("quota exceeded") as Error & { name: string };
+      err.name = "QuotaExceededError";
+      throw err;
+    }
     this.store.set(k, v);
   }
   removeItem(k: string) {
@@ -33,52 +45,112 @@ class MockStorage {
   }
 }
 
+function freshStorage(): MockStorage {
+  const ms = new MockStorage();
+  (globalThis as unknown as { localStorage: MockStorage }).localStorage = ms;
+  return ms;
+}
+
 beforeEach(() => {
-  // jsdom provides localStorage automatically when the env is jsdom; the
-  // node env here doesn't, so stand one up. Using a fresh mock per test
-  // keeps the isolation tight.
-  (globalThis as unknown as { localStorage: MockStorage }).localStorage =
-    new MockStorage();
+  freshStorage();
 });
 
-describe("serializeLayout / parseLayout", () => {
-  it("round-trips a list of elements through JSON byte-for-byte", () => {
+describe("listSlots", () => {
+  it("returns three null slots on a fresh storage", () => {
+    const slots = listSlots();
+    expect(slots).toHaveLength(SLOT_COUNT);
+    expect(slots.every((s) => s === null)).toBe(true);
+  });
+});
+
+describe("saveSlot / loadSlot / clearSlot", () => {
+  it("persists a slot and reads it back", () => {
     const before = freshElements();
-    const blob = serializeLayout(before);
-    const round = parseLayout(JSON.stringify(blob));
-    expect(round.elements).toEqual(before);
-    expect(round.schemaVersion).toBe(1);
+    saveSlot(0, "Doc shoot", before, "data:image/png;base64,thumb");
+    const got = loadSlot(0);
+    expect(got?.name).toBe("Doc shoot");
+    expect(got?.elements).toEqual(before);
+    expect(got?.thumbnail).toBe("data:image/png;base64,thumb");
+    expect(typeof got?.savedAt).toBe("number");
   });
 
-  it("rejects a non-JSON payload", () => {
-    expect(() => parseLayout("nope")).toThrow(LayoutSchemaError);
+  it("treats blank names as the slot's positional fallback", () => {
+    saveSlot(1, "   ", freshElements(), null);
+    expect(loadSlot(1)?.name).toBe("Slot 2");
   });
 
-  it("rejects a wrong schema version with a clear error", () => {
-    const stale = JSON.stringify({ schemaVersion: 99, elements: [] });
-    expect(() => parseLayout(stale)).toThrow(/unsupported schema version 99/);
+  it("clearSlot wipes one slot without affecting others", () => {
+    saveSlot(0, "A", freshElements(), null);
+    saveSlot(2, "C", freshElements(), null);
+    clearSlot(0);
+    expect(loadSlot(0)).toBeNull();
+    expect(loadSlot(2)?.name).toBe("C");
   });
 
-  it("rejects a payload that's missing an elements array", () => {
-    const broken = JSON.stringify({ schemaVersion: 1 });
-    expect(() => parseLayout(broken)).toThrow(/no elements array/);
+  it("rejects an out-of-range index", () => {
+    expect(() => saveSlot(99, "x", [], null)).toThrow();
+    expect(loadSlot(-1)).toBeNull();
   });
 });
 
-describe("save / load / has / clear default layout", () => {
-  it("saves, loads back, and reports presence", () => {
-    expect(hasDefaultLayout()).toBe(false);
-    expect(loadDefaultLayout()).toBeNull();
-    saveDefaultLayout(freshElements());
-    expect(hasDefaultLayout()).toBe(true);
-    const blob = loadDefaultLayout();
-    expect(blob?.elements).toEqual(freshElements());
+describe("renameSlot", () => {
+  it("updates the name without touching the elements", () => {
+    saveSlot(0, "Old", freshElements(), null);
+    renameSlot(0, "New name");
+    const slot = loadSlot(0);
+    expect(slot?.name).toBe("New name");
+    expect(slot?.elements).toEqual(freshElements());
   });
 
-  it("clear removes the slot", () => {
-    saveDefaultLayout(freshElements());
-    clearDefaultLayout();
-    expect(hasDefaultLayout()).toBe(false);
-    expect(loadDefaultLayout()).toBeNull();
+  it("is a no-op on an empty slot", () => {
+    renameSlot(1, "Whatever");
+    expect(loadSlot(1)).toBeNull();
+  });
+});
+
+describe("schema validation", () => {
+  it("rejects non-JSON", () => {
+    expect(() => parseBlob("not-json")).toThrow(LayoutSchemaError);
+  });
+
+  it("rejects mismatched schemaVersion", () => {
+    expect(() =>
+      parseBlob(JSON.stringify({ schemaVersion: 1, slots: [] })),
+    ).toThrow(/unsupported schema version 1/);
+  });
+
+  it("rejects a slots array of the wrong length", () => {
+    expect(() =>
+      parseBlob(JSON.stringify({ schemaVersion: 2, slots: [null, null] })),
+    ).toThrow(/wrong length/);
+  });
+});
+
+describe("legacy v1 migration", () => {
+  it("imports the old single-slot blob into slot 0", () => {
+    const ms = freshStorage();
+    ms.setItem(
+      "clapboard.layout.default",
+      JSON.stringify({
+        schemaVersion: 1,
+        savedAt: Date.now(),
+        elements: freshElements(),
+      }),
+    );
+    const slot = loadSlot(0);
+    expect(slot?.name).toBe("Default");
+    expect(slot?.elements).toEqual(freshElements());
+    // Migration also drops the legacy key on the next read.
+    expect(ms.getItem("clapboard.layout.default")).toBeNull();
+  });
+});
+
+describe("quota guard", () => {
+  it("surfaces a LayoutQuotaError when localStorage rejects a write", () => {
+    const ms = freshStorage();
+    ms.quotaBytes = 64; // tiny — guarantees the next setItem trips
+    expect(() =>
+      saveSlot(0, "Big", freshElements(), "data:image/png;base64,a".repeat(100)),
+    ).toThrow(LayoutQuotaError);
   });
 });
