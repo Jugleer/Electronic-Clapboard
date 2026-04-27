@@ -293,7 +293,7 @@ in mind when picking up Phase 2 onward.
 
 ---
 
-## Phase 2 — `/frame` accepts a 48 KB POST and writes it to the panel — **keystone**
+## Phase 2 — `/frame` accepts a 48 KB POST and writes it to the panel — **keystone** ✅ **landed 2026-04-27**
 
 **Slice delivered:** From the laptop, `curl --data-binary @some_48kb.bin -H 'Content-Type: application/octet-stream' http://clapboard.local/frame` causes the e-paper to render that frame. End-to-end pixels-on-screen over Wi-Fi.
 
@@ -486,7 +486,7 @@ hardware bench gates were run on **2026-04-27** and recorded inline below.
 
 ---
 
-## Phase 3 — Frontend skeleton: Vite app, canvas, "Send" posts a hardcoded frame
+## Phase 3 — Frontend skeleton: Vite app, canvas, "Send" posts a hardcoded frame ✅ **landed 2026-04-27**
 
 **Slice delivered:** `npm run dev` opens an editor page with an 800×480 canvas (zoomable to fit), a "Send to clapboard" button that takes whatever's currently rasterised on the canvas, packs it to 1bpp MSB-first, and POSTs to `clapboard.local/frame`. The canvas starts with one piece of placeholder text drawn by code, no editor UI yet.
 
@@ -511,6 +511,156 @@ hardware bench gates were run on **2026-04-27** and recorded inline below.
 
 ### Hand-off
 The full pipeline is alive. Anyone touching frontend after this point should not have to think about wire format.
+
+### Phase 3 implementation notes (read me before Phase 4+)
+
+Concrete decisions and gotchas from the implementation. Code-side is in;
+the hardware bench gate (laptop browser → device → panel) runs as part of
+sign-off and is recorded inline below when it lands.
+
+1. **`packFrame` takes an `ImageData`-shaped object, not an `HTMLCanvasElement`.**
+   Signature is `packFrame(image: { data, width, height }, threshold = 128)`,
+   matching the shape `ctx.getImageData(0, 0, W, H)` returns. The browser
+   call site in [web/src/useFrameSink.ts](../web/src/useFrameSink.ts) reads
+   the canvas in one line and forwards. This keeps the packer a pure
+   function unit-testable in node — `vitest` stays in `environment: "node"`,
+   no `jsdom`, no `node-canvas`/`jsdom-canvas` polyfill, no Cairo install on
+   Windows. Phase 0 implementation note 5 anticipated a jsdom switch in
+   Phase 3; we deliberately didn't take it. Reassess in Phase 4 when DOM
+   behaviour (handle drag, focus, keyboard) actually needs covering.
+
+2. **Oracle test = unpack-and-resynthesise, not canvas re-render.**
+   [web/src/packFrame.oracle.test.ts](../web/src/packFrame.oracle.test.ts)
+   loads `clapper_hero.bin` (PIL canonical bytes), unpacks to binary
+   pixels, synthesises an `ImageData`-shaped RGBA buffer where
+   `1 → (0,0,0,255)` and `0 → (255,255,255,255)`, runs `packFrame`, and
+   asserts ≡ original 48000 bytes. This is the actual claim Phase 3
+   makes — that the RGBA → luminance → threshold → `packFrame1bppMsb`
+   pipeline produces canonical bytes when fed canonical pixels. The
+   alternative ("render the same slate in canvas, byte-match Python")
+   would measure cross-rasterizer determinism (canvas text rendering,
+   polygon antialiasing, font metrics) which differs across systems and
+   isn't a property the packer should be responsible for.
+
+3. **`clapper_hero.bin` is the right oracle source because it's
+   threshold-only, not dithered.** [tools/generate_slides.py:385](../tools/generate_slides.py#L385)
+   ends `slide_clapper_hero` with `_to_1bit_threshold(img, threshold=128)`,
+   producing a binary image with no greys. [tools/dump_slide.py](../tools/dump_slide.py)
+   then calls `_to_1bit_dithered`, but Floyd-Steinberg on an already-mode-`1`
+   image is a no-op (no greys to diffuse), so the bytes match what JS
+   threshold-only would produce. Other slides (`reel_moon`, `film_camera`,
+   `pcb`, `self_portrait`) include greys and would NOT round-trip through
+   threshold-only — don't substitute them as oracle without re-deriving the
+   fixture from a threshold-only source.
+
+4. **Editor library — paper-narrowed; hands-on spike deferred to Phase 4
+   kickoff.** Phase 0 implementation note 2 deferred the spike to Phase 3;
+   the spike's deliverable was a *committed library decision*, not
+   committed library code. Phase 3 ships zero editor-lib deps (per "no
+   editor UI yet" in the slice), so "before committing" is satisfied. The
+   honest read of the constraint: hands-on jank evaluation needs an
+   interactive browser session, which belongs in the same conversation
+   that actually wires up the library. Paper narrowing:
+   - **react-konva** — recommended for the hands-on spike. Declarative
+     React wrapper around Konva; idiomatic for "scene graph of resizable
+     things" with a `<Transformer>` component for handles; mature,
+     reasonable bundle (~150 KB gz with Konva), no React-internals
+     hacks.
+   - **fabric.js** — fallback. Mature canvas library but imperative
+     (mutates objects directly); React integration is a wrapper layer we'd
+     have to keep in sync with React's reconciler. More code to write and
+     maintain than konva.
+   - **tldraw** — dropped. It's a whiteboard product, not a primitive;
+     embedding it inside our editor means fighting its built-in toolbar,
+     menus, and shape catalog. Wrong tool for "draw things on a fixed
+     800×480 canvas with a Send button."
+   - **Hand-rolled** — last resort. Phase 4's plan calls out editor-library
+     bites as the top context-exhaustion risk; rolling pointer/keyboard
+     handle logic ourselves is exactly that risk.
+
+   Quality bar for the Phase 4 hands-on spike: drag a text element across
+   the canvas, drag a corner handle to resize, click in and type, no
+   flicker / layout jump / handle-snap weirdness at 1× zoom. If react-konva
+   clears it in 30 min, decision made.
+
+5. **State management — `useState` only, Zustand decision deferred.** Phase
+   3 has three pieces of state (`host` string, send `status`, send
+   `error`), all co-located in [App.tsx](../web/src/App.tsx) plus the hook.
+   The Zustand-vs-RTK-vs-reducer call lands in Phase 4 when the editor
+   gains a list of elements with selection and drag state. Installing a
+   state lib for three `useState`s would be premature.
+
+6. **`useFrameSink` collapses `sending`/`rendering` into one `"sending"`
+   state.** Pushed back on the four-state model from the kickoff brief.
+   `fetch` has no upload-progress event (XHR's `upload.onprogress` does);
+   distinguishing "upload phase" from "render phase" requires switching
+   transports or chunking the body. Three states (`idle | sending | done | error`)
+   with optional `lastResult.render_ms` from the 200 body is honest —
+   four states with no way to enter `"rendering"` would be UI theatre.
+   Phase 4+ can switch to XHR if upload progress UI becomes useful.
+
+7. **Round-trip latency: ~5–8 s actual vs ~3 s aspirational.** Plan §
+   "Acceptance tests" calls for "round-trip latency under ~3 seconds";
+   Phase 2 bench measured ~3–4 s upload + ~2–4 s render = ~5–8 s total
+   (Phase 2 implementation note 9, second bullet under "Bench notes"). The
+   plan was written before bench numbers existed. Not a Phase 3 bug —
+   network-bound, within the 10 s client timeout in [docs/protocol.md §4](protocol.md#4-timeouts-and-retry).
+   Treat the 3 s figure as aspirational/historical until v2 either moves
+   to chunked-encoding upload or lowers the SPI/EPD render time.
+
+8. **Threshold = 128, Rec.709 luminance.** [web/src/packFrame.ts](../web/src/packFrame.ts)
+   exports `LUMINANCE_THRESHOLD = 128` and uses
+   `Y' = 0.2126 R + 0.7152 G + 0.0722 B`. Matches PIL's `mode '1'`
+   conversion default. Edge case the test pins down: `r=g=b=127` → ink,
+   `r=g=b=128` → paper (strict `<` comparison). Phase 6 replaces this
+   path with Floyd-Steinberg; Phase 3 explicitly does NOT dither.
+
+9. **Host config precedence: localStorage > env > default.**
+   [web/src/config.ts](../web/src/config.ts):
+   `localStorage["clapboard.host"]` (set on input blur in App) takes
+   priority over `import.meta.env.VITE_CLAPBOARD_HOST` (Vite build-time),
+   which falls back to `"clapboard.local"`. The text input above the canvas
+   is the user-visible override per Phase 1's Windows-mDNS-flaky note —
+   raw IPs work too. `http://` is added if the host string lacks a scheme.
+
+10. **`sendFrame` retry policy implements [docs/protocol.md §4](protocol.md#4-timeouts-and-retry)
+    exactly.** 503 (busy): try, sleep 500 ms, try, sleep 1 s, try, give up
+    (3 attempts). Other 5xx: retry once. Network (`TypeError` from fetch):
+    retry once. 4xx: never. Timeout (10 s `AbortController`): no retry —
+    the budget already accommodates render time. Sleep is injectable for
+    fast tests. Twelve mocked-fetch cases in
+    [web/src/sendFrame.test.ts](../web/src/sendFrame.test.ts) cover every
+    branch.
+
+11. **CORS is purely firmware-side from Phase 2.** Editor adds nothing —
+    the three `Access-Control-Allow-*` headers already ship on every
+    response path including 4xx and 503. The kickoff brief flagged this
+    as the most common silent breakage; resisted the temptation to add a
+    Vite dev-server proxy (would mask the actual deploy topology).
+
+12. **Bench acceptance — all five gates green on 2026-04-27** (USB-only,
+    12 V supply off, firmware [env:esp32s3-net] v0.2.0 unchanged from
+    Phase 2 — Phase 3 makes no firmware change):
+    - Gate A — happy path: editor at `npm run dev`, click Send, panel
+      renders the placeholder ("E-CLAPBOARD" + subtitle + border).
+      `GET /status` afterwards shows `last_frame_at`,
+      `last_frame_bytes: 48000`, `last_frame_render_ms` populated;
+      `last_full_refresh: false` (default partial). ✅
+    - Gate B — round-trip latency: ~5 s end-to-end, hovering across a few
+      runs. Status 200. Tracks the lower end of the Phase 2 ~5–8 s
+      envelope; the plan's ~3 s aspiration remains aspirational. ✅
+    - Gate C — error UX: pulled USB mid-send, UI surfaced a `timeout`
+      error, button re-enabled. After re-plug + Wi-Fi rejoin the next
+      Send succeeded. ✅
+    - Gate D — busy collision: defeating the disabled button via
+      DevTools fired a colliding POST; sendFrame's 503 backoff retried
+      and the second request eventually rendered. Display did not
+      corrupt. ✅
+    - Gate E — host override: raw IP typed into the host input,
+      blurred to persist, page hard-refreshed; input retained the IP
+      and Send still worked against it (localStorage round-trip). ✅
+
+    Phase 3 done. Hand-off to Phase 4 (editor primitives) is clean.
 
 ---
 
