@@ -165,7 +165,7 @@ electronic-clapboard/
 │   │   │   ├── HistoryButtons.tsx      # Undo/redo/duplicate
 │   │   │   ├── GroupButtons.tsx        # Group/ungroup
 │   │   │   ├── GridControls.tsx        # Snap toggle, grid visibility, spacing
-│   │   │   ├── LayoutButtons.tsx       # Single-slot localStorage save/restore
+│   │   │   ├── LayoutButtons.tsx       # 3-slot localStorage save/restore + rename + hover preview
 │   │   │   ├── LayerPanel.tsx          # Hierarchical: groups with nested members
 │   │   │   ├── PropertiesPanel.tsx     # Per-element styling (incl. icon, image)
 │   │   │   ├── renderToCanvas.ts       # Pure 2D-context rasteriser; drawIcon + drawUserImage

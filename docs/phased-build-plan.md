@@ -43,18 +43,22 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 6     | Image upload with client-side dithering               | ⏳ next     | —          |
 | 7     | Layout save/load (and `/sync` if hardware ready)      | ⏳ planned  | —          |
 
-**Firmware version:** `0.2.3` (no change in Phase 5). **Test totals:** 141
-vitest cases across 13 files, 67 native Unity cases across 7 programs,
-both firmware envs build clean. **Bundle:** ~480 KB JS (150 KB gz) +
-227 KB icon PNGs in `web/public/icons/` (lazy-loaded by category at
-runtime; not bundled into the JS).
+**Firmware version:** `0.2.3` (no firmware change in this pass).
+**Test totals:** 147 vitest cases across 13 files, 67 native Unity
+cases across 7 programs, both firmware envs build clean.
+**Bundle:** ~483 KB JS (152 KB gz) + 227 KB icon PNGs in
+`web/public/icons/` (lazy-loaded by category at runtime; not
+bundled into the JS). CI now enforces a 600 KB JS bundle gate and
+re-runs `tools/rasterise_icons.py` to catch icon-master drift.
 
 A post-Phase-5 polish pass shipped alongside: alignment + distribute
 helpers, Ctrl+Enter sends, host field auto-persists, image upload
-with adjustable threshold (drop-zone or `+ Image` button), and a
-single-slot localStorage layout save/restore. The image element
-brings forward the threshold-only render path that Phase 6 will
-extend with Floyd-Steinberg dither — the entry point in
+with adjustable threshold (drop-zone or `+ Image` button) plus a
+`+ Background` fit-cover variant pushed to the bottom of the layer
+stack, and three named layout slots in localStorage with hover-
+preview thumbnails and inline rename. The image element brings
+forward the threshold-only render path that Phase 6 will extend
+with Floyd-Steinberg dither — the entry point in
 `addImageFromFile.ts` doesn't change between phases.
 
 ---
