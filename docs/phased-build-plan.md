@@ -161,7 +161,7 @@ These are the concrete decisions and gotchas that emerged during the phase. Keep
 
 ---
 
-## Phase 1 — ESP32: Wi-Fi, mDNS, `/status`
+## Phase 1 — ESP32: Wi-Fi, mDNS, `/status` ✅ **landed 2026-04-27**
 
 **Slice delivered:** Flash the ESP32, it joins your Wi-Fi using `secrets.h`, advertises `clapboard.local`, and `curl http://clapboard.local/status` returns a JSON blob with firmware version, free heap, uptime, and a `last_frame_at: null` indicator. No display interaction.
 
@@ -321,6 +321,168 @@ This phase proves the entire architecture works. It is the "is this project work
 
 ### Hand-off
 Pixels arrive over Wi-Fi. The firmware side of v1 is feature-complete (modulo `/sync` in Phase 7). All remaining phases are about giving humans a nice way to make those 48 KB.
+
+### Phase 2 implementation notes (read me before Phase 3+)
+
+Concrete decisions and gotchas from the implementation. Code-side is in;
+hardware bench gates were run on **2026-04-27** and recorded inline below.
+
+1. **PSRAM buffer allocated once at boot, not per-request.**
+   [src/frame.cpp](../src/frame.cpp)'s `frame::begin()` calls
+   `heap_caps_malloc(48000, MALLOC_CAP_SPIRAM)` and panics loudly if it
+   returns null. /status reports ~8.36 MB PSRAM free, so a failure is a
+   programmer bug, not a runtime condition. Reusing the buffer avoids
+   fragmentation under sustained traffic and keeps the 320 KB SRAM free
+   for Wi-Fi/AsyncTCP. ESPAsyncWebServer's `onBody` delivers chunks with
+   `index`/`len`/`total` args, so we copy each chunk to `g_buf + index`
+   rather than handing the library a buffer pointer.
+
+2. **Synchronous render inside the request handler** (option (a) from
+   scope confirmation). `display::draw_frame` blocks AsyncTCP for ~1.5 s
+   (partial) to ~4 s (full); during that window other clients hitting
+   `/status` will queue. Acceptable per the plan: the editor only sends
+   one request at a time, and the 200 response carries `render_ms`,
+   which only makes sense if rendering completes before reply. Future
+   maintainers chasing "/status got slow during a frame" should look
+   here, not at status_json.
+
+3. **Single-flight via a `g_busy` flag set in `onBody`, not in the
+   route handler.** Async servers fire `onBody` before the request
+   handler runs, so the only safe place to refuse a colliding upload
+   is at the first chunk (`index == 0`). The handler distinguishes
+   four termination paths via `ReqCtx`:
+   - `verdict != Ok` → validation error (bad_size / too_large /
+     bad_content_type)
+   - `rejected_busy` → 503 (a render was in flight)
+   - `!body_started` → empty-body POST; validate Content-Length
+     post-hoc (covers `Content-Length: 0` and missing-CL cases)
+   - `bytes_received != 48000` → mid-upload truncation; reported as
+     `bad_size`
+   `onDisconnect` clears `g_busy` if the client drops mid-upload, so a
+   stranded flag can't permanently wedge the device.
+
+4. **Validation lives in pure C++ ([src/frame_validate.cpp](../src/frame_validate.cpp)),
+   linked into both the firmware and `[env:native]`.** Same pattern as
+   `status_json.cpp` and `log_ring.cpp`; ArduinoJson / WiFi / GxEPD2
+   stay out of native. 20 Unity tests in
+   [test/test_frame_validate/](../test/test_frame_validate/) cover
+   Content-Length boundaries (0 / 47999 / 48000 / 48001 / 1 MB),
+   Content-Type tolerance (canonical / parameters / case / leading
+   whitespace / wrong / empty), error-code mapping (400/413/415 +
+   slugs), and `?full=1` strict parsing. Run via
+   `pio test -e native -f test_frame_validate`. Total native suite is
+   now **50/50 cases** across six test programs.
+
+5. **Bit sense: `drawInvertedBitmap` is the right call.** Confirmed at
+   [src/display.cpp](../src/display.cpp) — `1 = ink` per protocol.md §1,
+   GxEPD2 inverts at draw time, so the math works out. The all-white
+   (48000 × `0x00`) → all-black (48000 × `0xFF`) bench test (gate 1
+   below) is the canary that catches inversion bugs in one pass; run it
+   *first* on every panel-driver change.
+
+6. **`firmware_version` bumped to `0.2.0`** in
+   [platformio.ini](../platformio.ini)'s `[env:esp32s3-net]`. Visible
+   on /status after flashing. Bump again as Phase 3+ adds features.
+
+7. **Typewriter env is still a clean compile.** New files
+   (`frame.cpp`, `frame_validate.cpp`, `display.cpp`) are filtered
+   *out* of `[env:esp32s3]` to keep the canary minimal —
+   `[env:esp32s3]` adds zero net deps and continues to use
+   `src/main.cpp` only. Verified locally: `pio run -e esp32s3`
+   builds (RAM 20.5%, Flash 4.4%); `pio run -e esp32s3-net` builds
+   (RAM 28.9%, Flash 12.0% — the GxEPD2 + Adafruit GFX libs add ~500 KB).
+
+8. **CORS for /frame: explicit `OPTIONS /frame` route, plus the
+   `onNotFound` preflight catcher from Phase 1 still answers any
+   missed paths.** `frame::register_routes` registers both the POST
+   and OPTIONS handlers and applies the same three
+   `Access-Control-Allow-*` headers from
+   [protocol.md](protocol.md) §3 to *every* response — happy path,
+   validation errors, busy 503s. The `Retry-After: 1` header is
+   added to the 503 body as a hint to clients (back-off rules in
+   §4 are still authoritative).
+
+9. **Bench acceptance — all six gates green on 2026-04-27.** First
+   pass uncovered an inverted bit sense (note 11 below); after the
+   fix, every gate behaved as the contract specifies. Reproduction
+   runbook follows so the gates can be re-run on any future change
+   that touches the data plane:
+   - Gate 1 (bit sense canary, **run first**): `printf '\x00%.0s'
+     {1..48000} | curl --data-binary @- -H 'Content-Type:
+     application/octet-stream' http://clapboard.local/frame?full=1`
+     → panel must go white; same with `\xff` → must go black. If
+     either inverts, stop and fix before any other gate.
+   - Gate 2 (canonical fixture): render the `clapper_hero` slide
+     from `tools/generate_slides.py`'s encoded bytes; compare to
+     `tools/preview/clapper_hero.png`. (No raw-byte dump tool exists
+     today; either add one or extract bytes via a one-liner from the
+     emitted `slides_artwork.h` PROGMEM array.)
+   - Gate 3 (size boundaries): 47999 → 400 / `bad_size`; 48001 →
+     413 / `too_large`; missing Content-Type → 415 /
+     `bad_content_type`; `text/plain` → 415.
+   - Gate 4 (back-to-back): two `curl` POSTs in tight loop — second
+     should return 503 / `busy` with `Retry-After: 1`; display must
+     not corrupt.
+   - Gate 5 (`/status` populated): after first successful POST,
+     `last_frame_at` ≈ `uptime_ms`, `last_frame_bytes: 48000`,
+     `last_frame_render_ms` populated, `last_full_refresh` matches
+     the request's query.
+   - Gate 6 (CORS): `curl -X OPTIONS -H 'Access-Control-Request-Method:
+     POST' http://clapboard.local/frame` returns 204 with all three
+     `Access-Control-Allow-*` headers. Verify the same headers appear
+     on 200 *and* 4xx response paths.
+
+   Bench notes:
+   - Gate 4 needs **two separate PowerShell windows** firing curl
+     near-simultaneously, *not* `Start-Job`. Background jobs spin up
+     a fresh PS process (~2-3 s overhead) so the second curl arrives
+     long after the first has finished uploading and rendering.
+     Two-window method: window A POSTs with `?full=1` (buys ~4 s of
+     busy time), window B fires within ~500 ms — one returns 200,
+     the other returns 503 / `busy` with `Retry-After: 1`. Display
+     stays correct.
+   - 48 KB upload over Wi-Fi takes ~3-4 s on this LAN; render adds
+     ~2 s partial / ~4 s full. End-to-end POST round-trip is
+     ~5-8 s — within the 10 s client timeout in protocol.md §4.
+
+   Native CI is green: 50/50 cases across six test programs.
+   `pio run -e esp32s3` (typewriter canary) builds (RAM 20.5%, Flash
+   4.4%); `pio run -e esp32s3-net` builds (RAM 28.9%, Flash 12.0%).
+
+10. **`request->_tempObject` is the right place for per-request
+    state in ESPAsyncWebServer.** Allocated lazily in `ctx()`, freed
+    in the `onDisconnect` callback. Don't free it in
+    `on_request_complete` — the response is sent asynchronously and
+    the request object outlives the handler return. Stranded state
+    on early disconnect is also handled by `onDisconnect`, which
+    clears `g_busy` if the dropped request owned it.
+
+11. **Bit-sense gotcha — `drawBitmap`, NOT `drawInvertedBitmap`.**
+    Initial implementation used `drawInvertedBitmap` because the
+    legacy `tools/generate_slides.py` pipeline pairs with it (see
+    the docstring at the top of that file). But that pipeline
+    *inverts at pack time* (`v = 1 if px == 0 else 0`), so the two
+    inversions cancel. Our wire spec from `tools/frame_format.py`
+    and `web/src/frameFormat.ts` packs **straight**: `1 = ink` per
+    protocol.md §1. Pairing straight-packed bytes with
+    `drawInvertedBitmap` flipped the panel — Gate 1's all-white →
+    panel-black, all-black → panel-white. Fixed in
+    [src/display.cpp](../src/display.cpp): use `drawBitmap` with
+    `GxEPD_BLACK` foreground. Gate 1 is the *only* test that catches
+    this — Gate 2 (the slide) looked plausible inverted because the
+    `clapper_hero` artwork is roughly black-and-white-balanced.
+    **Run Gate 1 first on every panel-driver change.**
+
+12. **`tools/dump_slide.py` packs via `frame_format.py`, NOT
+    `generate_slides.encode_1bpp_msb`.** Same reason as note 11 —
+    the encoder in `generate_slides.py` is paired with the
+    `drawInvertedBitmap` legacy path and inverts at pack time. The
+    new dump tool re-uses the slide *artwork* but routes packing
+    through the wire-spec module so the bytes-on-the-wire match
+    what the editor will eventually send. If we ever remove the
+    typewriter env (Phase 4 of the firmware refactor), the legacy
+    encoder can be deleted from `generate_slides.py` and this
+    footgun goes away.
 
 ---
 
