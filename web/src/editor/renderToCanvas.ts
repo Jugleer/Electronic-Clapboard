@@ -12,8 +12,17 @@
  */
 
 import { HEIGHT, WIDTH } from "../frameFormat";
+import { getCachedIcon } from "./icons/loader";
+import { getCachedImage } from "./imageCache";
 import { cssFontFamily } from "./types";
-import type { Element, LineElement, RectElement, TextElement } from "./types";
+import type {
+  Element,
+  IconElement,
+  ImageElement,
+  LineElement,
+  RectElement,
+  TextElement,
+} from "./types";
 
 export function rasterizeElements(elements: Element[]): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
@@ -36,6 +45,8 @@ export function rasterizeElements(elements: Element[]): HTMLCanvasElement {
     }
     if (el.type === "rect") drawRect(ctx, el);
     else if (el.type === "line") drawLine(ctx, el);
+    else if (el.type === "icon") drawIcon(ctx, el);
+    else if (el.type === "image") drawUserImage(ctx, el);
     else drawText(ctx, el);
     ctx.restore();
   }
@@ -61,6 +72,77 @@ function drawLine(ctx: CanvasRenderingContext2D, el: LineElement): void {
   ctx.moveTo(el.x, el.y);
   ctx.lineTo(el.x + el.w, el.y + el.h);
   ctx.stroke();
+}
+
+function drawIcon(ctx: CanvasRenderingContext2D, el: IconElement): void {
+  const img = getCachedIcon(el.src);
+  if (!img) {
+    // Cache miss — leaves the icon's footprint paper-coloured. The
+    // App preloads on mount, so the only way to hit this path in
+    // production is racing the very first user click during preload.
+    // The interactive view shows the same blank, which is honest.
+    return;
+  }
+  // `ctx.drawImage` accepts CanvasImageSource, which @napi-rs/canvas's
+  // Image satisfies under test and HTMLImageElement satisfies in the
+  // browser. The cast is the seam between the two.
+  ctx.drawImage(img as CanvasImageSource, el.x, el.y, el.w, el.h);
+  if (el.invert) {
+    // Invert ink/paper inside the bounding box only. `difference` against
+    // a black-filled rect of the same footprint flips the channels for
+    // every pixel that drawImage just wrote, leaving the rest of the
+    // canvas alone. Threshold-binarisation downstream then turns the
+    // (now ~white-on-black) silhouette into proper 1bpp ink.
+    ctx.save();
+    ctx.globalCompositeOperation = "difference";
+    ctx.fillStyle = "white";
+    ctx.fillRect(el.x, el.y, el.w, el.h);
+    ctx.restore();
+  }
+}
+
+// Rec.709 luma — same coefficients packFrame uses, kept private so the
+// per-element pre-binarisation lines up with the global cutoff.
+function luma(r: number, g: number, b: number): number {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function drawUserImage(
+  ctx: CanvasRenderingContext2D,
+  el: ImageElement,
+): void {
+  const img = getCachedImage(el.dataUrl);
+  if (!img) return;
+
+  // Per-element threshold + invert is applied on a temporary canvas
+  // sized to the element so downstream rotation works the same way as
+  // every other element. We draw the source into the temp at element
+  // dimensions, binarise in-place, then composite onto the main
+  // canvas under whatever rotation was already pushed by the caller.
+  const w = Math.max(1, Math.round(el.w));
+  const h = Math.max(1, Math.round(el.h));
+  const tmp = document.createElement("canvas");
+  tmp.width = w;
+  tmp.height = h;
+  const tctx = tmp.getContext("2d");
+  if (!tctx) return;
+  tctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
+  const data = tctx.getImageData(0, 0, w, h);
+  const bytes = data.data;
+  const cutoff = el.threshold;
+  for (let i = 0; i < bytes.length; i += 4) {
+    const y = luma(bytes[i], bytes[i + 1], bytes[i + 2]);
+    // Pre-binarise to pure black/white so the downstream packFrame's
+    // global 128 cutoff round-trips this element verbatim.
+    const ink = el.invert ? y >= cutoff : y < cutoff;
+    const v = ink ? 0 : 255;
+    bytes[i] = v;
+    bytes[i + 1] = v;
+    bytes[i + 2] = v;
+    bytes[i + 3] = 255;
+  }
+  tctx.putImageData(data, 0, 0);
+  ctx.drawImage(tmp, el.x, el.y, w, h);
 }
 
 function drawText(ctx: CanvasRenderingContext2D, el: TextElement): void {

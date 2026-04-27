@@ -1,5 +1,6 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
 
+import { findIcon } from "./icons/registry";
 import { useEditorStore } from "./store";
 import type { Element, GroupId } from "./types";
 
@@ -9,7 +10,11 @@ function describe(el: Element): string {
     return `Text — "${preview || "…"}"`;
   }
   if (el.type === "rect") return el.filled ? "Rect (filled)" : "Rect";
-  return "Line";
+  if (el.type === "line") return "Line";
+  if (el.type === "image") return el.invert ? "Image (inverted)" : "Image";
+  const entry = findIcon(el.src);
+  const label = entry?.label ?? el.src;
+  return el.invert ? `Icon — ${label} (inverted)` : `Icon — ${label}`;
 }
 
 interface Row {

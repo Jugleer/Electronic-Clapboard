@@ -2,12 +2,15 @@
 
 import "./testSetup";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { FRAME_BYTES, HEIGHT, WIDTH } from "../frameFormat";
 import { packFrame } from "../packFrame";
+import { clearIconCacheForTesting } from "./icons/loader";
+import { ICON_REGISTRY } from "./icons/registry";
+import { seedAllIconsFromDisk } from "./icons/testIconLoader";
 import { rasterizeElements } from "./renderToCanvas";
-import type { Element } from "./types";
+import type { Element, IconElement } from "./types";
 
 function readBytes(elements: Element[]): Uint8Array {
   const canvas = rasterizeElements(elements);
@@ -210,6 +213,141 @@ describe("rasterizeElements — rotation", () => {
     // and is ink at 90°.
     expect(pixelAt(a, 195, 150)).toBe(0);
     expect(pixelAt(b, 195, 150)).toBe(1);
+  });
+});
+
+describe("rasterizeElements — icon", () => {
+  function inkInBox(
+    bytes: Uint8Array,
+    x0: number,
+    y0: number,
+    w: number,
+    h: number,
+  ): number {
+    let n = 0;
+    for (let y = y0; y < y0 + h; y++) {
+      for (let x = x0; x < x0 + w; x++) {
+        if (pixelAt(bytes, x, y) === 1) n++;
+      }
+    }
+    return n;
+  }
+
+  beforeAll(async () => {
+    await seedAllIconsFromDisk();
+  });
+  afterEach(() => {
+    // Don't clear between every test — re-seeding is slow and the cache
+    // is read-only from the rasteriser's perspective. Reset only at the
+    // end of the file; the seedAllIconsFromDisk in beforeAll owns the
+    // lifecycle here.
+  });
+
+  it("draws ink within the icon's bounding box and paper outside", () => {
+    const icon: IconElement = {
+      id: "i1",
+      type: "icon",
+      x: 100,
+      y: 100,
+      w: 64,
+      h: 64,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      src: "film/movie",
+      invert: false,
+    };
+    const bytes = readBytes([icon]);
+    expect(inkInBox(bytes, 100, 100, 64, 64)).toBeGreaterThan(20);
+    // Far from the icon: paper.
+    expect(pixelAt(bytes, 50, 50)).toBe(0);
+    expect(pixelAt(bytes, 600, 400)).toBe(0);
+  });
+
+  it("invert flips ink/paper inside the bounding box", () => {
+    const base: IconElement = {
+      id: "i2",
+      type: "icon",
+      x: 200,
+      y: 200,
+      w: 64,
+      h: 64,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      src: "film/movie",
+      invert: false,
+    };
+    const a = readBytes([base]);
+    const b = readBytes([{ ...base, invert: true }]);
+    // Ink inside the box is dramatically different.
+    const inkA = inkInBox(a, 200, 200, 64, 64);
+    const inkB = inkInBox(b, 200, 200, 64, 64);
+    // Outline icon: relatively few ink pixels. Inverted: most pixels ink.
+    expect(inkA).toBeLessThan(64 * 64 / 2);
+    expect(inkB).toBeGreaterThan(64 * 64 / 2);
+    // Outside the box, both are paper.
+    expect(pixelAt(a, 100, 100)).toBe(0);
+    expect(pixelAt(b, 100, 100)).toBe(0);
+  });
+
+  it("rotates around the element's top-left like the other element types", () => {
+    const noRot: IconElement = {
+      id: "i3",
+      type: "icon",
+      x: 300,
+      y: 200,
+      w: 64,
+      h: 64,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      src: "film/movie",
+      invert: false,
+    };
+    const rotated: IconElement = { ...noRot, rotation: 90 };
+    const a = readBytes([noRot]);
+    const b = readBytes([rotated]);
+    expect(a).not.toEqual(b);
+  });
+
+  it("every advertised icon rasterises without throwing", () => {
+    for (const entry of ICON_REGISTRY) {
+      const el: IconElement = {
+        id: `smoke-${entry.id}`,
+        type: "icon",
+        x: 0,
+        y: 0,
+        w: 64,
+        h: 64,
+        rotation: 0,
+        locked: false,
+        groupId: null,
+        src: entry.id,
+        invert: false,
+      };
+      expect(() => readBytes([el])).not.toThrow();
+    }
+  });
+
+  it("cache miss leaves the footprint paper-coloured (no crash)", () => {
+    clearIconCacheForTesting();
+    const icon: IconElement = {
+      id: "i4",
+      type: "icon",
+      x: 0,
+      y: 0,
+      w: 64,
+      h: 64,
+      rotation: 0,
+      locked: false,
+      groupId: null,
+      src: "film/movie",
+      invert: false,
+    };
+    const bytes = readBytes([icon]);
+    expect(bytes.length).toBe(FRAME_BYTES);
+    expect(bytes.every((b) => b === 0x00)).toBe(true);
   });
 });
 

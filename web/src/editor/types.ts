@@ -60,7 +60,38 @@ export interface LineElement extends BaseElement {
   strokeWidth: number;
 }
 
-export type Element = TextElement | RectElement | LineElement;
+export interface IconElement extends BaseElement {
+  type: "icon";
+  // Registry id, e.g. "film/movie" — `<category>/<name>`. Resolves
+  // through the icon registry to a public asset path.
+  src: string;
+  // White-on-black silhouette toggle. On a 1bpp panel, an icon-on-
+  // black square sometimes reads better than the outline-on-white
+  // default; this flag inverts the rasterised pixels inside the
+  // element's bounding box at render time.
+  invert: boolean;
+}
+
+export interface ImageElement extends BaseElement {
+  type: "image";
+  // Base64-encoded data URL of the original upload. Phase 5 ships
+  // threshold-only binarisation; Phase 6 will add Floyd-Steinberg
+  // dither paths reading the same `dataUrl`.
+  dataUrl: string;
+  // Threshold cutoff in [0, 255]. 128 is centre-grey; lower → more
+  // ink, higher → more paper. Lets the user fine-tune contrast on a
+  // photo without re-uploading.
+  threshold: number;
+  // White-on-black inversion, same idiom as IconElement.invert.
+  invert: boolean;
+}
+
+export type Element =
+  | TextElement
+  | RectElement
+  | LineElement
+  | IconElement
+  | ImageElement;
 export type ElementType = Element["type"];
 
 export const DEFAULT_TEXT_SIZE: TextSize = 24;
@@ -83,6 +114,10 @@ export const DEFAULT_TEXT_ALIGN: TextAlign = "left";
 export const DEFAULT_VERTICAL_ALIGN: VerticalAlign = "top";
 export const DEFAULT_RECT_STROKE_WIDTH = 2;
 export const DEFAULT_LINE_STROKE_WIDTH = 2;
+export const DEFAULT_ICON_SIZE = 64;
+export const DEFAULT_ICON_SRC = "film/movie";
+export const DEFAULT_IMAGE_THRESHOLD = 128;
+export const DEFAULT_IMAGE_SIZE = 200;
 
 export function clampTextSize(n: number): TextSize {
   if (!Number.isFinite(n)) return DEFAULT_TEXT_SIZE;
@@ -92,6 +127,7 @@ export function clampTextSize(n: number): TextSize {
 export function defaultsFor(
   type: ElementType,
   position: { x: number; y: number },
+  options: { src?: string; dataUrl?: string; w?: number; h?: number } = {},
 ): Element {
   const base = {
     id: "",
@@ -101,6 +137,27 @@ export function defaultsFor(
     locked: false,
     groupId: null,
   };
+  if (type === "icon") {
+    return {
+      ...base,
+      type: "icon",
+      w: DEFAULT_ICON_SIZE,
+      h: DEFAULT_ICON_SIZE,
+      src: options.src ?? DEFAULT_ICON_SRC,
+      invert: false,
+    };
+  }
+  if (type === "image") {
+    return {
+      ...base,
+      type: "image",
+      w: options.w ?? DEFAULT_IMAGE_SIZE,
+      h: options.h ?? DEFAULT_IMAGE_SIZE,
+      dataUrl: options.dataUrl ?? "",
+      threshold: DEFAULT_IMAGE_THRESHOLD,
+      invert: false,
+    };
+  }
   if (type === "text") {
     return {
       ...base,

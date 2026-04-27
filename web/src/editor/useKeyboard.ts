@@ -14,7 +14,10 @@ const ARROWS: Record<string, "up" | "down" | "left" | "right"> = {
   ArrowRight: "right",
 };
 
-export function useKeyboardShortcuts(enabled: boolean): void {
+export function useKeyboardShortcuts(
+  enabled: boolean,
+  onSend?: () => void,
+): void {
   useEffect(() => {
     if (!enabled) return;
 
@@ -30,6 +33,15 @@ export function useKeyboardShortcuts(enabled: boolean): void {
 
       const store = useEditorStore.getState();
       const cmd = e.ctrlKey || e.metaKey;
+
+      // Send to clapboard. Ctrl+Enter / Cmd+Enter — same chord most
+      // creative tools use for "commit and ship". Suppressed while
+      // editing because Enter inside a textarea inserts a newline.
+      if (cmd && e.key === "Enter") {
+        e.preventDefault();
+        onSend?.();
+        return;
+      }
 
       // Undo / redo. Ctrl+Z, Ctrl+Shift+Z, and Ctrl+Y.
       if (cmd && (e.key === "z" || e.key === "Z")) {
@@ -93,5 +105,5 @@ export function useKeyboardShortcuts(enabled: boolean): void {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [enabled]);
+  }, [enabled, onSend]);
 }

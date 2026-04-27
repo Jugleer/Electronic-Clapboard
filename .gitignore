@@ -17,9 +17,16 @@
 
 # Cross-language and canvas-glue oracle fixtures are checked-in on purpose
 # (negates *.bin above). oracle_frame.bin (Phase 0) pins the wire format;
-# clapper_hero.bin (Phase 3) pins the RGBA → threshold → pack glue.
+# clapper_hero.bin (Phase 3) pins the RGBA → threshold → pack glue;
+# icon_movie_64.bin (Phase 5) pins the icon-rasteriser output for the
+# canonical clapboard icon at 64×64 — the visual-regression snapshot.
 !web/src/__fixtures__/oracle_frame.bin
 !web/src/__fixtures__/clapper_hero.bin
+!web/src/__fixtures__/icon_movie_64.bin
+
+# Tabler SVG download cache for tools/rasterise_icons.py — committed
+# PNG masters in web/public/icons/ are the build output.
+tools/icons-cache/
 
 # IDE / OS cruft
 .idea/

@@ -18,6 +18,21 @@ type AnyCanvas = any;
 
 const realGetContext = HTMLCanvasElement.prototype.getContext;
 
+// Unwrap a jsdom HTMLCanvasElement to its backing @napi-rs canvas so
+// `ctx.drawImage(otherCanvas, ...)` works across the polyfill seam.
+// Without this, drawImage rejects the jsdom element since it isn't
+// an @napi-rs Canvas, Image, or SVG.
+function unwrap(arg: unknown): unknown {
+  if (
+    typeof HTMLCanvasElement !== "undefined" &&
+    arg instanceof HTMLCanvasElement
+  ) {
+    const backing = (arg as HTMLCanvasElement & { [KEY]?: AnyCanvas })[KEY];
+    return backing ?? arg;
+  }
+  return arg;
+}
+
 HTMLCanvasElement.prototype.getContext = function patched(
   this: HTMLCanvasElement & { [KEY]?: AnyCanvas },
   contextId: string,
@@ -36,5 +51,16 @@ HTMLCanvasElement.prototype.getContext = function patched(
     backing = createCanvas(w, h);
     this[KEY] = backing;
   }
-  return backing.getContext("2d");
+  const ctx = backing.getContext("2d");
+  if (ctx && !ctx.__patchedDrawImage) {
+    const realDrawImage = ctx.drawImage.bind(ctx);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ctx.drawImage = (...args: any[]) => {
+      args[0] = unwrap(args[0]);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (realDrawImage as any)(...args);
+    };
+    ctx.__patchedDrawImage = true;
+  }
+  return ctx;
 };

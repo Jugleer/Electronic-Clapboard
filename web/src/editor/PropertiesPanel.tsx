@@ -1,3 +1,4 @@
+import { ICON_CATEGORIES, ICON_REGISTRY } from "./icons/registry";
 import { useEditorStore } from "./store";
 import {
   clampTextSize,
@@ -25,6 +26,8 @@ export function PropertiesPanel(): JSX.Element {
   const updateText = useEditorStore((s) => s.updateText);
   const updateRect = useEditorStore((s) => s.updateRect);
   const updateLine = useEditorStore((s) => s.updateLine);
+  const updateIcon = useEditorStore((s) => s.updateIcon);
+  const updateImage = useEditorStore((s) => s.updateImage);
   const rotateElement = useEditorStore((s) => s.rotateElement);
   const fonts = useSystemFonts();
 
@@ -190,6 +193,71 @@ export function PropertiesPanel(): JSX.Element {
             >
               I
             </button>
+          </div>
+        </div>
+      ) : element.type === "image" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label>
+            Threshold{" "}
+            <input
+              type="range"
+              min={1}
+              max={254}
+              step={1}
+              value={element.threshold}
+              onChange={(e) =>
+                updateImage(element.id, { threshold: Number(e.target.value) })
+              }
+              style={{ width: 140 }}
+            />{" "}
+            <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
+              {element.threshold}
+            </span>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={element.invert}
+              onChange={(e) => updateImage(element.id, { invert: e.target.checked })}
+            />{" "}
+            Invert
+          </label>
+          <div style={{ color: "#888", fontSize: 11 }}>
+            Threshold-only binarisation in v1; Floyd-Steinberg dither
+            arrives in Phase 6.
+          </div>
+        </div>
+      ) : element.type === "icon" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label>
+            Icon{" "}
+            <select
+              value={element.src}
+              onChange={(e) => updateIcon(element.id, { src: e.target.value })}
+              style={{ minWidth: 180 }}
+            >
+              {ICON_CATEGORIES.map((cat) => (
+                <optgroup key={cat.id} label={cat.label}>
+                  {ICON_REGISTRY.filter((e) => e.category === cat.id).map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.label}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={element.invert}
+              onChange={(e) => updateIcon(element.id, { invert: e.target.checked })}
+            />{" "}
+            Invert (white-on-black silhouette)
+          </label>
+          <div style={{ color: "#888", fontSize: 11 }}>
+            Preview shows a dimmed icon over a black backdrop when
+            inverted; the panel renders the silhouette directly.
           </div>
         </div>
       ) : element.type === "rect" ? (

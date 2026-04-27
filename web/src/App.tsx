@@ -3,13 +3,18 @@ import { useEffect, useRef, useState } from "react";
 
 import { DEFAULT_HOST, persistHost, resolveDefaultHost } from "./config";
 import { EditorCanvas } from "./editor/EditorCanvas";
+import { IconPicker } from "./editor/icons/IconPicker";
+import { preloadCategory } from "./editor/icons/loader";
 import { LayerPanel } from "./editor/LayerPanel";
 import { PropertiesPanel } from "./editor/PropertiesPanel";
 import { rasterizeElements } from "./editor/renderToCanvas";
 import { useEditorStore } from "./editor/store";
+import { addImageFromFile } from "./editor/addImageFromFile";
+import { AlignButtons } from "./editor/AlignButtons";
 import { GridControls } from "./editor/GridControls";
 import { GroupButtons } from "./editor/GroupButtons";
 import { HistoryButtons } from "./editor/HistoryButtons";
+import { LayoutButtons } from "./editor/LayoutButtons";
 import { Toolbar } from "./editor/Toolbar";
 import { useKeyboardShortcuts } from "./editor/useKeyboard";
 import { useFrameSink } from "./useFrameSink";
@@ -17,11 +22,39 @@ import { useFrameSink } from "./useFrameSink";
 export function App() {
   const stageRef = useRef<Konva.Stage | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [host, setHost] = useState<string>(() => resolveDefaultHost());
   const [fullRefresh, setFullRefresh] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
   const { status, error, lastResult, send } = useFrameSink({ host });
   const elementCount = useEditorStore((s) => s.elements.length);
+
+  const onPickFile: React.ChangeEventHandler<HTMLInputElement> = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      await addImageFromFile(file);
+      setImageError(null);
+    } catch (err) {
+      setImageError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const onCanvasDrop: React.DragEventHandler<HTMLDivElement> = async (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+    try {
+      await addImageFromFile(file);
+      setImageError(null);
+    } catch (err) {
+      setImageError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   // After a successful ?full=1 response, the firmware still has a
   // deferred partial-content lock-in pass running on its loop() task
@@ -50,16 +83,29 @@ export function App() {
   }, [lockinUntil, now]);
   const lockinActive = lockinUntil !== null && now < lockinUntil;
 
-  useKeyboardShortcuts(editingId === null);
-
   const onSend = () => {
     const elements = useEditorStore.getState().elements;
     const canvas = rasterizeElements(elements);
-    // Firmware handles saturation lock-in itself on ?full=1 (white-
-    // flash full pass + content partial pass). No client-side
-    // double-send needed.
     void send(canvas, { full: fullRefresh });
   };
+
+  useKeyboardShortcuts(editingId === null, onSend);
+
+  // Warm the film-category icon cache on mount so the very first user
+  // interaction with the picker is instant. The other categories load
+  // lazily as their accordion sections expand.
+  useEffect(() => {
+    void preloadCategory("film");
+  }, []);
+
+  // Persist the host field as the user types (debounced) so a tab
+  // close mid-edit doesn't lose a half-typed hostname. The blur
+  // handler is left in place for the rare case the user closes the
+  // tab inside the debounce window.
+  useEffect(() => {
+    const id = window.setTimeout(() => persistHost(host), 250);
+    return () => window.clearTimeout(id);
+  }, [host]);
 
   const onHostBlur = () => {
     persistHost(host);
@@ -121,28 +167,67 @@ export function App() {
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <Toolbar />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              style={{ padding: "6px 12px", fontSize: 14 }}
+              title="Upload a PNG or JPG image (or drop one onto the canvas)"
+            >
+              + Image
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={onPickFile}
+              style={{ display: "none" }}
+            />
             <HistoryButtons />
             <GroupButtons />
           </div>
+          <AlignButtons />
+          <LayoutButtons />
           <GridControls />
-          <EditorCanvas
-            stageRef={stageRef}
-            containerRef={containerRef}
-            editingId={editingId}
-            setEditingId={setEditingId}
-          />
+          {imageError ? (
+            <div style={{ color: "#a00", fontSize: 12 }}>
+              Image upload failed: {imageError}
+            </div>
+          ) : null}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (!dragOver) setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={onCanvasDrop}
+            style={{
+              position: "relative",
+              outline: dragOver ? "3px dashed #0a7" : "none",
+              outlineOffset: 2,
+            }}
+          >
+            <EditorCanvas
+              stageRef={stageRef}
+              containerRef={containerRef}
+              editingId={editingId}
+              setEditingId={setEditingId}
+            />
+          </div>
           <p style={{ color: "#666", margin: 0, fontSize: 12, maxWidth: 800 }}>
             800×480 frame, 1bpp MSB-first, 1 = ink. Click a tool to add an
             element; drag to move, drag corners to resize, double-click text
-            to edit. Shift+click and marquee-drag to multi-select. Hold Shift
-            while dragging to lock movement to an axis. Ctrl+Z / Ctrl+Y undo
-            and redo, Ctrl+D duplicates, Ctrl+A selects all, Ctrl+G groups
-            (Ctrl+Shift+G ungroups), Delete removes, arrow keys nudge.
+            to edit. Drop a PNG / JPG onto the canvas (or use + Image) to add
+            a photo with adjustable threshold. Shift+click and marquee-drag to
+            multi-select. Hold Shift while dragging to lock movement to an
+            axis. Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D duplicates, Ctrl+A
+            selects all, Ctrl+G groups (Ctrl+Shift+G ungroups), Ctrl+Enter
+            sends, Delete removes, arrow keys nudge.
           </p>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 260 }}>
           <PropertiesPanel />
           <LayerPanel />
+          <IconPicker />
         </div>
       </section>
     </main>

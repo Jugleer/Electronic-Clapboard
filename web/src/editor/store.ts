@@ -16,6 +16,8 @@ import {
   type ElementId,
   type ElementType,
   type GroupId,
+  type IconElement,
+  type ImageElement,
   type LineElement,
   type RectElement,
   type TextElement,
@@ -35,9 +37,21 @@ export interface EditorState {
 
 export type NudgeDirection = "up" | "down" | "left" | "right";
 export type LayerMove = "up" | "down" | "top" | "bottom";
+export type AlignSide =
+  | "left"
+  | "center-x"
+  | "right"
+  | "top"
+  | "center-y"
+  | "bottom";
+export type DistributeAxis = "horizontal" | "vertical";
 
 export interface EditorActions {
-  addElement: (type: ElementType, position: { x: number; y: number }) => ElementId;
+  addElement: (
+    type: ElementType,
+    position: { x: number; y: number },
+    options?: { src?: string; dataUrl?: string; w?: number; h?: number },
+  ) => ElementId;
   selectElement: (id: ElementId, additive?: boolean) => void;
   selectMany: (ids: ElementId[]) => void;
   clearSelection: () => void;
@@ -57,9 +71,14 @@ export interface EditorActions {
   nudgeSelected: (direction: NudgeDirection, large: boolean) => void;
   setLocked: (id: ElementId, locked: boolean) => void;
   reorderLayer: (id: ElementId, move: LayerMove) => void;
+  alignSelected: (side: AlignSide) => void;
+  distributeSelected: (axis: DistributeAxis) => void;
+  loadLayout: (elements: Element[]) => void;
   updateText: (id: ElementId, patch: Partial<Omit<TextElement, "id" | "type">>) => void;
   updateRect: (id: ElementId, patch: Partial<Omit<RectElement, "id" | "type">>) => void;
   updateLine: (id: ElementId, patch: Partial<Omit<LineElement, "id" | "type">>) => void;
+  updateIcon: (id: ElementId, patch: Partial<Omit<IconElement, "id" | "type">>) => void;
+  updateImage: (id: ElementId, patch: Partial<Omit<ImageElement, "id" | "type">>) => void;
   // Undo/redo (history middleware-style; see commitHistory in store body).
   undo: () => void;
   redo: () => void;
@@ -77,6 +96,27 @@ function nextId(): ElementId {
 
 const NUDGE_SMALL = 1;
 const NUDGE_LARGE = 10;
+
+// Lines store their endpoints as (x,y) and (x+w, y+h); w/h can be
+// negative for an upward / leftward segment. Other elements have a
+// strictly positive (w, h). The bbox helpers normalise so alignment
+// math works on every type without special-casing.
+function bboxLeft(el: Element): number {
+  if (el.type === "line") return Math.min(el.x, el.x + el.w);
+  return el.x;
+}
+function bboxRight(el: Element): number {
+  if (el.type === "line") return Math.max(el.x, el.x + el.w);
+  return el.x + el.w;
+}
+function bboxTop(el: Element): number {
+  if (el.type === "line") return Math.min(el.y, el.y + el.h);
+  return el.y;
+}
+function bboxBottom(el: Element): number {
+  if (el.type === "line") return Math.max(el.y, el.y + el.h);
+  return el.y + el.h;
+}
 
 function patchElement(
   state: EditorState,
@@ -144,10 +184,10 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
       selectedIds: [],
       isolatedGroupId: null,
 
-      addElement: (type, position) => {
+      addElement: (type, position, options) => {
         const id = nextId();
         commit((state) => {
-          const el: Element = { ...defaultsFor(type, position), id };
+          const el: Element = { ...defaultsFor(type, position, options), id };
           return { elements: [...state.elements, el], selectedIds: [id] };
         });
         return id;
@@ -370,6 +410,119 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
       setLocked: (id, locked) =>
         commit((state) => patchElement(state, id, (el) => ({ ...el, locked }))),
 
+      alignSelected: (side) =>
+        commit((state) => {
+          if (state.selectedIds.length < 2) return state;
+          const sel = state.elements.filter((e) =>
+            state.selectedIds.includes(e.id),
+          );
+          // The shared edge / centerline is computed from the union of
+          // every selected element (including locked ones, since they
+          // anchor the alignment), then movable members are nudged to
+          // that line. Lines use their bounding box so axis-aligned
+          // segments still pull along the orthogonal axis.
+          const unionLeft = Math.min(...sel.map((e) => bboxLeft(e)));
+          const unionRight = Math.max(...sel.map((e) => bboxRight(e)));
+          const unionTop = Math.min(...sel.map((e) => bboxTop(e)));
+          const unionBottom = Math.max(...sel.map((e) => bboxBottom(e)));
+          const cx = (unionLeft + unionRight) / 2;
+          const cy = (unionTop + unionBottom) / 2;
+          const ids = new Set(state.selectedIds);
+          let mutated = false;
+          const elements = state.elements.map((el) => {
+            if (!ids.has(el.id) || el.locked) return el;
+            const w = bboxRight(el) - bboxLeft(el);
+            const h = bboxBottom(el) - bboxTop(el);
+            const dx =
+              side === "left"
+                ? unionLeft - bboxLeft(el)
+                : side === "right"
+                  ? unionRight - bboxRight(el)
+                  : side === "center-x"
+                    ? cx - (bboxLeft(el) + w / 2)
+                    : 0;
+            const dy =
+              side === "top"
+                ? unionTop - bboxTop(el)
+                : side === "bottom"
+                  ? unionBottom - bboxBottom(el)
+                  : side === "center-y"
+                    ? cy - (bboxTop(el) + h / 2)
+                    : 0;
+            if (dx === 0 && dy === 0) return el;
+            mutated = true;
+            return { ...el, x: el.x + dx, y: el.y + dy };
+          });
+          return mutated ? { ...state, elements } : state;
+        }),
+
+      loadLayout: (elements) =>
+        commit((state) => {
+          // Wipe selection + isolation so a freshly loaded layout
+          // doesn't carry stale ids over from the previous session.
+          // History is preserved (the load itself is undoable).
+          void state;
+          return {
+            elements: elements.slice(),
+            selectedIds: [],
+            isolatedGroupId: null,
+          } as Partial<EditorStore>;
+        }),
+
+      distributeSelected: (axis) =>
+        commit((state) => {
+          if (state.selectedIds.length < 3) return state;
+          const ids = new Set(state.selectedIds);
+          const sel = state.elements
+            .filter((e) => ids.has(e.id))
+            .slice()
+            .sort((a, b) =>
+              axis === "horizontal" ? bboxLeft(a) - bboxLeft(b) : bboxTop(a) - bboxTop(b),
+            );
+          // Even-gap distribution: total span − sum of widths/heights →
+          // gap = remainder / (count − 1). Endpoints stay anchored.
+          const totalSpan =
+            axis === "horizontal"
+              ? bboxRight(sel[sel.length - 1]) - bboxLeft(sel[0])
+              : bboxBottom(sel[sel.length - 1]) - bboxTop(sel[0]);
+          const summed = sel.reduce(
+            (acc, e) =>
+              acc +
+              (axis === "horizontal" ? bboxRight(e) - bboxLeft(e) : bboxBottom(e) - bboxTop(e)),
+            0,
+          );
+          const totalGap = totalSpan - summed;
+          const gap = totalGap / (sel.length - 1);
+          let cursor =
+            axis === "horizontal"
+              ? bboxLeft(sel[0]) + (bboxRight(sel[0]) - bboxLeft(sel[0]))
+              : bboxTop(sel[0]) + (bboxBottom(sel[0]) - bboxTop(sel[0]));
+          // sel[0] doesn't move; sel[last] doesn't move. Middle members
+          // get planted at `cursor + gap` and cursor advances by their
+          // span.
+          const targets = new Map<ElementId, number>();
+          for (let i = 1; i < sel.length - 1; i++) {
+            const e = sel[i];
+            const startTarget = cursor + gap;
+            targets.set(e.id, startTarget);
+            cursor =
+              startTarget +
+              (axis === "horizontal" ? bboxRight(e) - bboxLeft(e) : bboxBottom(e) - bboxTop(e));
+          }
+          if (targets.size === 0) return state;
+          let mutated = false;
+          const elements = state.elements.map((el) => {
+            const target = targets.get(el.id);
+            if (target === undefined || el.locked) return el;
+            const dx = axis === "horizontal" ? target - bboxLeft(el) : 0;
+            const dy = axis === "vertical" ? target - bboxTop(el) : 0;
+            if (dx === 0 && dy === 0) return el;
+            mutated = true;
+            return { ...el, x: el.x + dx, y: el.y + dy };
+          });
+          return mutated ? { ...state, elements } : state;
+        }),
+
       reorderLayer: (id, move) =>
         commit((state) => {
           const idx = state.elements.findIndex((e) => e.id === id);
@@ -403,6 +556,20 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
         commit((state) =>
           patchElement(state, id, (el) =>
             el.type === "line" ? { ...el, ...patch } : null,
+          ),
+        ),
+
+      updateIcon: (id, patch) =>
+        commit((state) =>
+          patchElement(state, id, (el) =>
+            el.type === "icon" ? { ...el, ...patch } : null,
+          ),
+        ),
+
+      updateImage: (id, patch) =>
+        commit((state) =>
+          patchElement(state, id, (el) =>
+            el.type === "image" ? { ...el, ...patch } : null,
           ),
         ),
 

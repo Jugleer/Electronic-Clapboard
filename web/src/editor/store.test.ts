@@ -11,6 +11,60 @@ beforeEach(() => {
   useStore = createEditorStore();
 });
 
+describe("addElement — icon", () => {
+  it("appends an icon at the click position with defaults", () => {
+    const id = get().addElement("icon", { x: 80, y: 80 });
+    const els = get().elements;
+    expect(els).toHaveLength(1);
+    const el = els[0];
+    expect(el.type).toBe("icon");
+    expect(el.id).toBe(id);
+    expect(el.x).toBe(80);
+    expect(el.y).toBe(80);
+    expect(el.w).toBe(64);
+    expect(el.h).toBe(64);
+    if (el.type === "icon") {
+      expect(el.src).toBe("film/movie");
+      expect(el.invert).toBe(false);
+    }
+  });
+
+  it("respects an explicit src option", () => {
+    get().addElement("icon", { x: 0, y: 0 }, { src: "arrows/arrow-up" });
+    const el = get().elements[0];
+    if (el.type !== "icon") throw new Error("expected icon");
+    expect(el.src).toBe("arrows/arrow-up");
+  });
+
+  it("updateIcon patches src and invert; rejects non-icon ids", () => {
+    const iconId = get().addElement("icon", { x: 0, y: 0 });
+    const rectId = get().addElement("rect", { x: 0, y: 0 });
+    get().updateIcon(iconId, { invert: true, src: "symbols/star" });
+    const icon = get().elements.find((e) => e.id === iconId);
+    if (!icon || icon.type !== "icon") throw new Error("expected icon");
+    expect(icon.invert).toBe(true);
+    expect(icon.src).toBe("symbols/star");
+    // No-op on a rect.
+    get().updateIcon(rectId, { invert: true });
+    const rect = get().elements.find((e) => e.id === rectId);
+    if (!rect || rect.type !== "rect") throw new Error("expected rect");
+    expect((rect as unknown as { invert?: boolean }).invert).toBeUndefined();
+  });
+
+  it("duplicate copies src and invert", () => {
+    const id = get().addElement("icon", { x: 50, y: 50 });
+    get().updateIcon(id, { invert: true, src: "emoji/mood-smile" });
+    get().selectElement(id);
+    const [copyId] = get().duplicateSelected();
+    const copy = get().elements.find((e) => e.id === copyId);
+    if (!copy || copy.type !== "icon") throw new Error("expected icon");
+    expect(copy.src).toBe("emoji/mood-smile");
+    expect(copy.invert).toBe(true);
+    expect(copy.x).toBe(60);
+    expect(copy.y).toBe(60);
+  });
+});
+
 describe("addElement", () => {
   it("appends a text element with defaults at the click position", () => {
     const id = get().addElement("text", { x: 100, y: 200 });

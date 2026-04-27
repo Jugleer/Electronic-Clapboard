@@ -9,6 +9,7 @@ import Konva from "konva";
 import { useEffect, useRef, useState } from "react";
 import {
   Circle as KCircle,
+  Image as KImage,
   Layer,
   Line as KLine,
   Rect as KRect,
@@ -19,10 +20,19 @@ import {
 
 import { HEIGHT, WIDTH } from "../frameFormat";
 import { snap, useGridStore } from "./gridStore";
+import { getCachedIcon } from "./icons/loader";
+import { getCachedImage } from "./imageCache";
 import { useEditorStore } from "./store";
 import { TextEditorOverlay } from "./TextEditorOverlay";
 import { cssFontFamily } from "./types";
-import type { Element, LineElement, RectElement, TextElement } from "./types";
+import type {
+  Element,
+  IconElement,
+  ImageElement,
+  LineElement,
+  RectElement,
+  TextElement,
+} from "./types";
 
 interface EditorCanvasProps {
   stageRef: React.MutableRefObject<Konva.Stage | null>;
@@ -464,6 +474,96 @@ function ElementNode({
       onIsolateMember();
     }
   };
+
+  if (el.type === "icon") {
+    const ic = el as IconElement;
+    const img = getCachedIcon(ic.src);
+    // While loading, render an empty rect placeholder so the
+    // selection/transform UI still attaches and the user can move/
+    // resize the slot. The Konva preview will pop in once the image
+    // resolves; the rasterised bytes follow the same cache so they
+    // don't drift.
+    if (!img) {
+      return (
+        <KRect
+          ref={setRef}
+          {...common}
+          width={ic.w}
+          height={ic.h}
+          stroke="#bbb"
+          strokeWidth={1}
+          dash={[3, 3]}
+          fill="transparent"
+          onDblClick={onDblNonText}
+          onDblTap={onDblNonText}
+        />
+      );
+    }
+    // Inverted preview: an outline icon on a black backdrop, matching
+    // the rasterised bytes' silhouette aesthetic. Konva can't do a
+    // per-shape `difference` composite without forcing a sync cache(),
+    // so we lean on the much simpler trick of drawing a black rect
+    // beneath an opacity-50 ghost of the un-inverted icon — close
+    // enough as a "this will render inverted on the panel" hint.
+    return (
+      <>
+        {ic.invert ? (
+          <KRect
+            x={ic.x}
+            y={ic.y}
+            width={ic.w}
+            height={ic.h}
+            rotation={ic.rotation}
+            fill="black"
+            listening={false}
+          />
+        ) : null}
+        <KImage
+          ref={setRef}
+          {...common}
+          image={img as unknown as HTMLImageElement}
+          width={ic.w}
+          height={ic.h}
+          opacity={ic.invert ? 0.4 : 1}
+          onDblClick={onDblNonText}
+          onDblTap={onDblNonText}
+        />
+      </>
+    );
+  }
+
+  if (el.type === "image") {
+    const im = el as ImageElement;
+    const img = getCachedImage(im.dataUrl);
+    if (!img) {
+      return (
+        <KRect
+          ref={setRef}
+          {...common}
+          width={im.w}
+          height={im.h}
+          stroke="#bbb"
+          strokeWidth={1}
+          dash={[3, 3]}
+          fill="transparent"
+          onDblClick={onDblNonText}
+          onDblTap={onDblNonText}
+        />
+      );
+    }
+    return (
+      <KImage
+        ref={setRef}
+        {...common}
+        image={img as unknown as HTMLImageElement}
+        width={im.w}
+        height={im.h}
+        opacity={im.invert ? 0.5 : 1}
+        onDblClick={onDblNonText}
+        onDblTap={onDblNonText}
+      />
+    );
+  }
 
   if (el.type === "rect") {
     const r = el as RectElement;
