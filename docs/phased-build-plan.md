@@ -39,14 +39,23 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 2     | `/frame` POST → e-paper render — **keystone**         | ✅ done     | 2026-04-27 |
 | 3     | Frontend skeleton: Vite app, canvas, hardcoded send   | ✅ done     | 2026-04-27 |
 | 4     | Editor primitives: text/rect/line, groups, snap, undo | ✅ done     | 2026-04-27 |
-| 5     | Icon library                                          | ⏳ next     | —          |
-| 6     | Image upload with client-side dithering               | ⏳ planned  | —          |
+| 5     | Icon library                                          | ✅ done     | 2026-04-27 |
+| 6     | Image upload with client-side dithering               | ⏳ next     | —          |
 | 7     | Layout save/load (and `/sync` if hardware ready)      | ⏳ planned  | —          |
 
-**Firmware version:** `0.2.3` (Phase 4). **Test totals:** 101 vitest cases
-across 7 files, 67 native Unity cases across 7 programs, both firmware
-envs build clean. **Bundle:** ~463 KB (145 KB gz) — Konva + react-konva
-account for most of it; revisit before Phase 5 adds icon assets.
+**Firmware version:** `0.2.3` (no change in Phase 5). **Test totals:** 141
+vitest cases across 13 files, 67 native Unity cases across 7 programs,
+both firmware envs build clean. **Bundle:** ~480 KB JS (150 KB gz) +
+227 KB icon PNGs in `web/public/icons/` (lazy-loaded by category at
+runtime; not bundled into the JS).
+
+A post-Phase-5 polish pass shipped alongside: alignment + distribute
+helpers, Ctrl+Enter sends, host field auto-persists, image upload
+with adjustable threshold (drop-zone or `+ Image` button), and a
+single-slot localStorage layout save/restore. The image element
+brings forward the threshold-only render path that Phase 6 will
+extend with Floyd-Steinberg dither — the entry point in
+`addImageFromFile.ts` doesn't change between phases.
 
 ---
 
@@ -933,7 +942,7 @@ bench gate H records the post-Phase-4 state.
 
 ---
 
-## Phase 5 — Icon library
+## Phase 5 — Icon library ✅ **landed 2026-04-27**
 
 **Slice delivered:** A panel of ~25 film-related icons (clapboard, camera, microphone, slate, lens, reel, take number, scene, director's chair, light, tripod, megaphone, etc.) draggable into the canvas, positioned, resized, rendered as 1-bit.
 
@@ -955,6 +964,173 @@ bench gate H records the post-Phase-4 state.
 
 ### Hand-off
 Editor has all the visual primitives a film slate needs.
+
+### Phase 5 implementation notes (read me before Phase 6+)
+
+Phase 5 grew the editor's vocabulary beyond film-only — the user
+asked for categorised icons (arrows, symbols, emoji, misc) alongside
+film, and the picker UI is an accordion with search. 63 icons across
+5 categories landed; firmware was untouched (`firmware_version`
+stays 0.2.3).
+
+#### Icon source + delivery
+1. **Source: Tabler Icons (MIT) outline weight, pinned at version
+   3.24.0.** [docs/icons.md](icons.md) records the licence text and
+   refresh procedure. The list of advertised icons lives in two
+   parallel places — [tools/rasterise_icons.py](../tools/rasterise_icons.py)
+   `ICONS` (the build input) and
+   [web/src/editor/icons/registry.ts](../web/src/editor/icons/registry.ts)
+   `ICON_REGISTRY` (the runtime view). The registry test in
+   [web/src/editor/icons/registry.test.ts](../web/src/editor/icons/registry.test.ts)
+   asserts every advertised id has a backing PNG on disk and no
+   orphan PNG exists outside the registry — drift between the two
+   lists fails CI.
+
+2. **Delivery: pre-rasterised 128×128 grayscale PNG masters in
+   `web/public/icons/<category>/<name>.png`**, served by Vite as
+   static assets (NOT bundled into the JS). The pre-rasterise step
+   is one-shot at vendoring time via
+   `python tools/rasterise_icons.py`, which fetches Tabler SVGs
+   from jsDelivr and pipes them through `cairosvg` → PIL. Tabler
+   3.24.0 does not ship `flashlight` (404 from jsDelivr); we use
+   `lamp` instead. SVG cache lives in `tools/icons-cache/`
+   (gitignored).
+
+3. **Why pre-rasterise instead of shipping SVGs.** The visual-
+   regression snapshot test compares byte output against a
+   committed binary fixture; browser SVG rasterisers (Skia in
+   Chromium, WebKit's CG, Firefox's own) and the test environment
+   (@napi-rs/canvas via resvg) produce *different* bytes for the
+   same SVG. By collapsing the variable to "drawImage of a
+   pre-rasterised PNG + bilinear scale + threshold", every consumer's
+   render path becomes byte-stable across browser Skia and
+   @napi-rs/canvas's Skia. Bundle cost: 227 KB total icon assets,
+   lazy-loaded by category at runtime; the JS bundle ticked from
+   463 KB → 470 KB raw (gz 145 → 148) — well under the 600 KB
+   redirect threshold.
+
+#### Element model + render path
+4. **`IconElement` joins the discriminated union** in
+   [web/src/editor/types.ts](../web/src/editor/types.ts) with
+   `src` (registry id, e.g. `"film/movie"`) and `invert` (boolean,
+   white-on-black silhouette). Common props (`x`/`y`/`w`/`h`/
+   `rotation`/`locked`/`groupId`) come for free. `defaultsFor`
+   accepts an optional `{ src }` so the picker can pass the chosen
+   icon at add time without a separate action.
+
+5. **Render path: `drawIcon(ctx, el)` in
+   [web/src/editor/renderToCanvas.ts](../web/src/editor/renderToCanvas.ts).**
+   Reads the runtime cache via `getCachedIcon(id)`. Cache miss
+   leaves the element's footprint paper-coloured (and the
+   interactive view shows the same paper rect — honest about the
+   not-yet-loaded state). `invert: true` post-fills with a
+   `globalCompositeOperation: "difference"` against white inside
+   the element's bbox, which flips the channels for every pixel
+   `drawImage` just wrote without touching the rest of the canvas.
+
+6. **`ctx.drawImage` accepts both HTMLImageElement (browser) and
+   @napi-rs/canvas Image (test environment).** A single
+   `as CanvasImageSource` cast is the seam between the two; the
+   rest of the draw pipeline is identical.
+
+#### Loading + caching
+7. **Single shared cache, fire-and-forget loader.** The image cache
+   in [web/src/editor/icons/loader.ts](../web/src/editor/icons/loader.ts)
+   is a module-level `Map<id, HTMLImageElement>` populated by
+   `<img src=...>` in production and seeded from disk via
+   @napi-rs/canvas `loadImage` in tests
+   ([testIconLoader.ts](../web/src/editor/icons/testIconLoader.ts)).
+   `loadIcon(id)` deduplicates concurrent loads via an inflight
+   `Map<id, Promise>`. Konva's `KImage` and the 2D-context
+   rasteriser share the same cache — what you see in the editor
+   matches the bytes on the wire byte-for-byte (modulo the invert
+   preview limitation, see note 9).
+
+8. **Lazy preload by category.** Only `film` is preloaded eagerly
+   on App mount (warm path for the very first user click). Every
+   other category preloads when its accordion section is first
+   expanded *or* when a search query produces a hit in that
+   category. The picker thumbnail grid shows a `…` placeholder
+   while a category is in flight.
+
+9. **Invert preview limitation.** Konva can't apply a per-shape
+   `globalCompositeOperation: "difference"` without forcing a sync
+   `Konva.Node.cache()`, which is heavy for live editing. The
+   interactive preview shows a 40%-opacity icon over a black
+   backdrop when invert is on — close enough as a "this will render
+   inverted on the panel" hint. The 2D-context rasteriser does the
+   real difference-composite, so the bytes on the wire are
+   correct. The PropertiesPanel surfaces this with a subtitle.
+
+#### Visual-regression snapshot
+10. **One canonical icon, locked-in bytes, in
+    [web/src/__fixtures__/icon_movie_64.bin](../web/src/__fixtures__/icon_movie_64.bin).**
+    The fixture is the full 48 000-byte packed frame produced by
+    `rasterizeElements` + `packFrame` for a single
+    `film/movie` icon at 64×64 placed at (100, 100). The plan called
+    for a snapshot per icon; we narrowed to one canonical icon plus
+    a smoke test that every advertised icon rasterises without
+    throwing — same regression-detection power, dramatically less
+    binary churn. Refresh deliberately:
+    `cd web && UPDATE_ICON_SNAPSHOT=1 npx vitest run src/editor/icons/snapshot.test.ts`.
+    Vitest's expect-equal already fails CI on byte mismatch; no
+    separate `git diff --exit-code` step needed (unlike the
+    Python-generated `oracle_frame.bin`, which has a parallel
+    Python encoder that can drift independently).
+
+11. **Test environment continuity.** All icon tests use the same
+    `// @vitest-environment jsdom` + `testSetup.ts` polyfill the
+    Phase 4 render-path tests use — @napi-rs/canvas under jsdom.
+    No new test infra was introduced.
+
+#### Picker UI
+12. **Vertical accordion with search.** The picker
+    ([IconPicker.tsx](../web/src/editor/icons/IconPicker.tsx))
+    renders one expandable section per category, with a search box
+    above that filters across all categories by label / name /
+    category. Film is open by default. Click an icon → adds at
+    (80, 80) at 64×64. Drag-from-panel-to-canvas was scoped out;
+    HTML5 DnD + Konva pointer-event coordination is its own
+    session of footguns.
+
+13. **No Toolbar entry for icons.** The picker is the canonical
+    add-icon surface. Adding a "+ Icon" button to the Toolbar
+    would just open the picker anyway.
+
+#### Other UI
+14. **PropertiesPanel** gains an icon branch with a single dropdown
+    (categorised `<optgroup>` of every advertised icon) and an
+    `Invert` checkbox. The existing rotation control is shared with
+    text/rect via `element.type !== "line"`.
+15. **LayerPanel** describes icons by their registry label (e.g.
+    `Icon — Clapboard (inverted)`). [findIcon](../web/src/editor/icons/registry.ts)
+    is the lookup.
+
+#### Bench acceptance — Gate I (post-Phase-5; run on hardware after merge)
+- Click an icon in the picker → element appears at (80, 80) at
+  64×64 with the right glyph.
+- Resize → icon scales smoothly via bilinear; threshold output
+  remains crisp at common sizes (32–200 px).
+- Rotate → 45° increments snap; rasterised bytes match preview.
+- Invert toggle → preview shows dimmed icon on black backdrop;
+  Send produces a white-on-black silhouette on the panel.
+- Multi-icon layout (clapboard top-left, camera top-right, name
+  text below) sends and renders without ghosting on a clean
+  full-refresh.
+- Picker accordion: expand "Arrows" — first frame shows `…`
+  placeholders, then thumbnails populate. Search "smile" → emoji
+  category auto-loads; only mood-smile shows in the grid.
+
+#### Test totals after Phase 5
+- **vitest: 121 cases** across 10 files (15 new since Phase 4: 6
+  registry, 4 loader, 1 snapshot, 5 render-path icon, 4 store
+  icon).
+- **Native Unity: 67 cases** unchanged (no firmware change).
+- `npm run typecheck`, `npm run build` (470 KB / 148 KB gz):
+  green. Static `web/public/icons/` adds 227 KB across 63 PNGs,
+  served lazy by category.
+- `pio run -e esp32s3-net` and `pio run -e esp32s3` (typewriter
+  canary): both build clean.
 
 ---
 

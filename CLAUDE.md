@@ -92,13 +92,16 @@ USB_D+:  GPIO 20
 - Branch per feature, merge to `main`
 - Never commit secrets, WiFi credentials, or API keys
 
-## Repository structure (current, post-Phase 4)
+## Repository structure (current, post-Phase 5)
 
 The repo evolved from "single-firmware ESP32 project" into "ESP32
 firmware + browser editor", and split the firmware into a typewriter
 canary plus a frame-sink network firmware. Two parallel PlatformIO envs
 build them side-by-side, plus a `[env:native]` for pure-logic unit
-tests. The Vite/React editor lives under `web/`.
+tests. The Vite/React editor lives under `web/`. Phase 5 added a
+categorised icon library — pre-rasterised PNG masters in
+`web/public/icons/` plus registry/loader/picker UI under
+`web/src/editor/icons/`; see [docs/icons.md](docs/icons.md).
 
 ```
 electronic-clapboard/
@@ -109,6 +112,7 @@ electronic-clapboard/
 ├── docs/
 │   ├── phased-build-plan.md   # The roadmap; phase notes are load-bearing
 │   ├── protocol.md            # HTTP wire contract (frame format, /status, etc.)
+│   ├── icons.md               # Tabler vendor info, licence, refresh procedure (Phase 5)
 │   ├── wiring-guide.md        # Breadboard wiring (Phase 0)
 │   └── bom.md                 # Bill of materials
 ├── include/
@@ -130,36 +134,53 @@ electronic-clapboard/
 ├── tools/
 │   ├── frame_format.py        # Python wire-format mirror; oracle for cross-language equivalence
 │   ├── generate_oracle_fixture.py  # Regenerates web/src/__fixtures__/oracle_frame.bin
+│   ├── rasterise_icons.py     # SVG→128px grayscale PNG vendoring (Phase 5; one-shot)
 │   ├── generate_slides.py     # Legacy slide art used by the typewriter demo
 │   └── dump_slide.py          # Pack a slide via frame_format and bench-flash it
 ├── web/                       # Browser editor (Phase 3+)
 │   ├── package.json           # Pinned versions (Phase 0 implementation note 3)
 │   ├── vite.config.ts         # node test environment; per-file jsdom for canvas tests
+│   ├── public/
+│   │   └── icons/             # Pre-rasterised PNG icon masters by category (Phase 5)
+│   │       ├── film/          # 25 production-related icons (eager-loaded on App mount)
+│   │       ├── arrows/        # 10 arrows (lazy-loaded on accordion expand)
+│   │       ├── symbols/       # 12 geometric primitives + punctuation
+│   │       ├── emoji/         # 8 mood-* faces
+│   │       └── misc/          # 8 utility icons
 │   ├── src/
-│   │   ├── App.tsx            # Top-level wiring; status + send button + grid controls
+│   │   ├── App.tsx            # Top-level wiring; preloads film icons on mount
 │   │   ├── frameFormat.ts     # JS/TS mirror of tools/frame_format.py
 │   │   ├── packFrame.ts       # ImageData → 1bpp MSB bytes (threshold-only)
 │   │   ├── sendFrame.ts       # POST /frame with §4 retry semantics
 │   │   ├── useFrameSink.ts    # React hook around sendFrame + packFrame
 │   │   ├── config.ts          # Host resolution: localStorage > env > default
 │   │   ├── editor/
-│   │   │   ├── types.ts                # Element model + cssFontFamily helper
+│   │   │   ├── types.ts                # Element model (text/rect/line/icon/image)
 │   │   │   ├── store.ts                # Zustand store with undo middleware
 │   │   │   ├── gridStore.ts            # Snap/grid view-state (own zustand instance)
-│   │   │   ├── EditorCanvas.tsx        # Konva stage with Transformer + line endpoints
+│   │   │   ├── EditorCanvas.tsx        # Konva stage; KImage for icon + image previews
 │   │   │   ├── TextEditorOverlay.tsx   # HTML <textarea> overlaid on Konva.Text
-│   │   │   ├── Toolbar.tsx             # Add-element buttons
+│   │   │   ├── Toolbar.tsx             # Add-element buttons (text/rect/line)
+│   │   │   ├── AlignButtons.tsx        # Align left/center/right/top/middle/bottom + distribute
 │   │   │   ├── HistoryButtons.tsx      # Undo/redo/duplicate
 │   │   │   ├── GroupButtons.tsx        # Group/ungroup
 │   │   │   ├── GridControls.tsx        # Snap toggle, grid visibility, spacing
+│   │   │   ├── LayoutButtons.tsx       # Single-slot localStorage save/restore
 │   │   │   ├── LayerPanel.tsx          # Hierarchical: groups with nested members
-│   │   │   ├── PropertiesPanel.tsx     # Per-element styling
-│   │   │   ├── renderToCanvas.ts       # Pure 2D-context rasteriser for the send path
+│   │   │   ├── PropertiesPanel.tsx     # Per-element styling (incl. icon, image)
+│   │   │   ├── renderToCanvas.ts       # Pure 2D-context rasteriser; drawIcon + drawUserImage
+│   │   │   ├── addImageFromFile.ts     # FileReader → cache + addElement('image')
+│   │   │   ├── imageCache.ts           # Decoded HTMLImageElement cache for image elements
+│   │   │   ├── layoutSlot.ts           # Schema-versioned localStorage layout blob
 │   │   │   ├── useKeyboard.ts          # Document-level shortcut wiring
 │   │   │   ├── useSystemFonts.ts       # Local Font Access API (Chromium)
 │   │   │   ├── testSetup.ts            # @napi-rs/canvas polyfill for jsdom tests
-│   │   │   └── __fixtures__/...
-│   │   └── __fixtures__/      # Cross-language oracle fixtures (binary)
+│   │   │   └── icons/                  # Phase 5
+│   │   │       ├── registry.ts             # ID/category/label/src single-source
+│   │   │       ├── loader.ts               # Image cache + lazy preloadCategory
+│   │   │       ├── testIconLoader.ts       # Test-only disk loader via @napi-rs/canvas
+│   │   │       └── IconPicker.tsx          # Accordion + search picker UI
+│   │   └── __fixtures__/      # Binary oracle / snapshot fixtures (oracle_frame.bin, clapper_hero.bin, icon_movie_64.bin)
 ├── test/                      # Native (host-side) Unity tests via [env:native]
 │   ├── test_state_machine/    # Original demo state machine
 │   ├── test_battery/          # Voltage threshold logic
