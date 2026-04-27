@@ -556,7 +556,19 @@ def slide_pcb() -> Image.Image:
 def encode_1bpp_msb(img: Image.Image) -> bytes:
     """Convert a PIL '1' image to 1bpp MSB-first packed bytes,
     where 1 = ink (black). PIL's '1' mode stores 0=black,255=white,
-    so we invert at packing time."""
+    so we invert at packing time.
+
+    NOT the wire-format encoder for POST /frame. This function pairs
+    with `display.drawInvertedBitmap()` in the legacy PROGMEM-header
+    pipeline that feeds [env:esp32s3]'s typewriter demo — its inversion
+    cancels the driver's. The /frame data plane uses
+    `display.drawBitmap()` directly and expects bytes packed straight
+    per docs/protocol.md §1. For anything heading to the wire, use
+    `tools/frame_format.py:pack_1bpp_msb` (or the JS mirror at
+    `web/src/frameFormat.ts`); see `tools/dump_slide.py` for an example
+    of re-using slide artwork through the wire-spec encoder. Phase 2
+    implementation note 11 in `docs/phased-build-plan.md` has the
+    full backstory."""
     assert img.mode == "1"
     assert img.size == (W, H)
     px = img.load()

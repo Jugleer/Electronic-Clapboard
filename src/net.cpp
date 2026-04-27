@@ -6,6 +6,7 @@
 #include <ESPAsyncWebServer.h>
 
 #include "clap_log.h"
+#include "frame.h"
 #include "secrets.h"
 #include "status_json.h"
 
@@ -32,10 +33,10 @@ bool           was_connected       = false;
 uint32_t       last_reconnect_ms   = 0;
 uint32_t       boot_ms             = 0;
 
-// /status currently has no last-frame metadata (Phase 2 lands /frame).
-// Wired through a function pointer so Phase 2 can populate it without
-// touching this file's connection plumbing.
-std::optional<LastFrameMeta> last_frame_meta;
+// /status pulls last-frame metadata from frame::last_meta() — populated
+// by the /frame route after each successful render. Phase 1 left the
+// optional empty here; Phase 2 routes the read through the frame module
+// so net.cpp doesn't need to know about render bookkeeping.
 
 void apply_cors_headers(AsyncWebServerResponse* response) {
     response->addHeader("Access-Control-Allow-Origin",  CORS_ORIGIN);
@@ -49,7 +50,7 @@ void handle_status(AsyncWebServerRequest* request) {
     in.uptime_ms        = millis();
     in.free_heap        = ESP.getFreeHeap();
     in.psram_free       = ESP.getFreePsram();
-    in.last_frame       = last_frame_meta;
+    in.last_frame       = frame::last_meta();
 
     const std::string body = build_status_json(in);
 
@@ -72,6 +73,11 @@ void handle_options(AsyncWebServerRequest* request) {
 void start_http_server() {
     server.on("/status", HTTP_GET,     handle_status);
     server.on("/status", HTTP_OPTIONS, handle_options);
+
+    // /frame routes (POST + OPTIONS) live in the frame module, but they
+    // share the same CORS policy and onNotFound preflight catcher
+    // registered below.
+    frame::register_routes(server);
 
     server.onNotFound([](AsyncWebServerRequest* request) {
         // CORS preflight to a path we don't yet serve — answer it cleanly
