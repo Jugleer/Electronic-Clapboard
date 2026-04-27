@@ -40,16 +40,18 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 3     | Frontend skeleton: Vite app, canvas, hardcoded send   | ✅ done     | 2026-04-27 |
 | 4     | Editor primitives: text/rect/line, groups, snap, undo | ✅ done     | 2026-04-27 |
 | 5     | Icon library                                          | ✅ done     | 2026-04-27 |
-| 6     | Image upload with client-side dithering               | ⏳ next     | —          |
+| 6     | Image upload with client-side dithering               | ✅ done     | 2026-04-27 |
 | 7     | Layout save/load (and `/sync` if hardware ready)      | ⏳ planned  | —          |
 
-**Firmware version:** `0.2.3` (no firmware change in this pass).
-**Test totals:** 147 vitest cases across 13 files, 67 native Unity
+**Firmware version:** `0.2.3` (Phase 6 made no firmware change).
+**Test totals:** 167 vitest cases across 14 files, 67 native Unity
 cases across 7 programs, both firmware envs build clean.
-**Bundle:** ~483 KB JS (152 KB gz) + 227 KB icon PNGs in
+**Bundle:** ~485 KB JS (152 KB gz) + 227 KB icon PNGs in
 `web/public/icons/` (lazy-loaded by category at runtime; not
-bundled into the JS). CI now enforces a 600 KB JS bundle gate and
-re-runs `tools/rasterise_icons.py` to catch icon-master drift.
+bundled into the JS). CI now enforces a 600 KB JS bundle gate,
+re-runs `tools/rasterise_icons.py` to catch icon-master drift, and
+re-runs `tools/generate_dither_oracle.py` to catch divergence
+between our FS port and Pillow's reference output.
 
 A post-Phase-5 polish pass shipped alongside: alignment + distribute
 helpers, Ctrl+Enter sends, host field auto-persists, image upload
@@ -1161,6 +1163,137 @@ stays 0.2.3).
 
 ### Hand-off
 Editor is feature-complete per v1 scope.
+
+### Phase 6 implementation notes (read me before Phase 7+)
+
+Phase 6 replaced the threshold-only image binarisation with a real
+Floyd-Steinberg dither path that matches Pillow's
+`Image.convert("1", dither=Image.Dither.FLOYDSTEINBERG)` byte-for-byte.
+Brightness/contrast pre-pass sliders, an algorithm dropdown, and a
+silent migration for pre-Phase-6 saved layouts ride alongside.
+Firmware was untouched (`firmware_version` stays 0.2.3).
+
+#### Dither equivalence
+
+1. **PIL FS port lives in [web/src/editor/dither.ts](../web/src/editor/dither.ts).**
+   The algorithm is a faithful translation of Pillow's
+   `tobilevel(L → 1)` from
+   [libImaging/Convert.c](https://github.com/python-pillow/Pillow/blob/12.2.0/src/libImaging/Convert.c#L1363).
+   Three details are non-negotiable for matching byte-for-byte:
+   - C-style truncating-toward-zero division (`Math.trunc(x / 16)`,
+     **not** `>> 4` — arithmetic-shift floors toward minus-infinity
+     for negative carries and diverges on a few percent of pixels).
+   - CLIP8 to [0, 255] *before* the threshold compare; without the
+     clamp the algorithm overshoots on high-contrast edges.
+   - PIL's threshold is `l > 128 → paper`. So luminance 128 itself
+     dithers to ink. Phase 3's `packFrame` threshold uses `< 128 →
+     ink` (so 128 → paper); these only disagree at the exact
+     boundary and both paths are independently correct because the
+     dither pre-binarises to pure 0/255 before packFrame ever runs.
+   The PIL kernel uses a triple of running carries `(l, l0, l1)` and
+   a per-row `(W+1)`-entry errors array; the JS port keeps those
+   names and structure verbatim so the porting trail stays legible.
+
+2. **Equivalence is proven via byte-exact fixture.** Plan flagged
+   two options for the dither oracle:
+   (a) commit a PIL-rendered PNG and assert visual equivalence with a
+       tolerance, or
+   (b) implement an FS that matches PIL exactly and assert byte
+       equality against a Python-generated fixture.
+   We took (b). [tools/generate_dither_oracle.py](../tools/generate_dither_oracle.py)
+   produces a deterministic 64×32 grayscale image (top half: horizontal
+   ramp; bottom half: diagonal gradient — exercises both axes of error
+   transport), runs PIL's FS, and writes
+   [web/src/__fixtures__/fs_oracle_gradient.bin](../web/src/__fixtures__/fs_oracle_gradient.bin)
+   with a 4-byte `FSO1` magic + W/H header + L8 input + 1-bit packed
+   ink-positive output. Vitest's
+   [dither.test.ts](../web/src/editor/dither.test.ts) reads it,
+   synthesises L8→RGBA, runs `floydSteinbergInPlace`, packs to ink,
+   and asserts byte equality against the fixture. CI also runs the
+   regenerator and `git diff --exit-code` so a Pillow upgrade or
+   accidental algorithm tweak fails the build.
+
+3. **PIL is raster-order, NOT serpentine.** The Phase 6 kickoff brief
+   warned about PIL serialising serpentine; verified empirically and
+   from the C source — Pillow processes pixels left-to-right,
+   top-to-bottom every row. No serpentine flip.
+
+#### Render path
+
+4. **`drawUserImage` switches on `el.algorithm`.** Brightness/contrast
+   pre-pass runs first (skipped when both are 0 — the default), then
+   either `floydSteinbergInPlace` or `thresholdInPlace`. The dither
+   re-runs every send; we deliberately don't cache the dithered output
+   because the cache key would be (dataUrl, algorithm, threshold,
+   brightness, contrast, w, h) — a six-tuple that explodes on slider
+   drag. ~50 ms FS at 800×480 on the main thread is fine for the
+   click-to-Send cadence; doc the limit, no Web Worker. See
+   [web/src/editor/renderToCanvas.ts](../web/src/editor/renderToCanvas.ts).
+
+5. **Editor preview shows the un-dithered source.** The interactive
+   Konva-side `KImage` displays the cached decoded source verbatim;
+   the dither only happens on the rasterise-and-send path. The image
+   PropertiesPanel surfaces this with a hint subtitle. A live FS
+   preview would either need Konva caching (heavy on slider drag) or
+   a Worker (Phase 7+ if users ask for it).
+
+6. **Brightness/contrast formula.** Brightness is a linear shift in
+   [-255, +255] mapped from the slider's [-100, +100] range. Contrast
+   uses the standard GIMP/Photoshop curve
+   `factor = (259 * (c + 255)) / (255 * (259 - c))` centred at 128.
+   At `b=0, c=0` it's a no-op; the test covers the saturating
+   extremes (±100 brightness saturates to all-paper / all-ink after
+   FS, as expected).
+
+#### Element model + schema migration
+
+7. **`ImageElement` gains `algorithm`, `brightness`, `contrast`.**
+   `algorithm: "threshold" | "fs"`, both numerics in [-100, 100].
+   `defaultsFor("image", …)` sets `algorithm: "fs"`,
+   `brightness: 0`, `contrast: 0` — FS is the better default for
+   typical photo uploads.
+
+8. **No schema-version bump; migrate-on-load instead.** `layoutSlot.ts`
+   already shipped `schemaVersion: 2` for the multi-slot rework, and
+   the Phase 6 fields all have safe defaults — bumping to v3 would
+   force a "your saved layout uses an older format" dialog on every
+   Phase 5 layout for no user-visible benefit. `parseBlob` runs
+   every loaded element through `migrateElement`, which patches
+   missing fields on `ImageElement` with `algorithm: "threshold"`,
+   `brightness: 0`, `contrast: 0`. Default to "threshold" — NOT "fs"
+   — so a legacy layout's appearance doesn't shift on load; the user
+   tuned threshold by hand in Phase 5 and we preserve it. Fresh
+   `defaultsFor` uploads get FS. Two migration tests in
+   [layoutSlot.test.ts](../web/src/editor/layoutSlot.test.ts) cover
+   both branches.
+
+#### Test totals after Phase 6
+
+- **vitest: 167 cases** across 14 files (14 dither algorithm + 4 new
+  image-render-path FS/brightness, 2 layout migration, plus the
+  121 carried from Phase 5; existing image.test.ts grew to add the
+  new required ImageElement fields).
+- **Native Unity: 67 cases** unchanged (no firmware change).
+- `npm run typecheck`, `npm run lint`, `npm run build`
+  (~485 KB / 152 KB gz): green.
+- `pio run -e esp32s3-net` (RAM 29.0%, Flash 12.1%) and
+  `pio run -e esp32s3` (typewriter canary): both build clean.
+
+#### Bench acceptance — Gate J (post-Phase-6; run on hardware after merge)
+
+- Drag a photo onto the canvas → image appears at fit-60% with
+  `algorithm: "fs"` by default; Send → panel renders dithered.
+- Switch algorithm to threshold → threshold slider appears; drag
+  it left/right and Send → panel ink coverage tracks.
+- Brightness +50, Send → panel image visibly lightens.
+- Contrast +50 on a flat-ish photo, Send → mid-tones split toward
+  black/white.
+- Invert toggle on FS → panel renders the photographic negative.
+- Resize a 1000×750 photo to fill the frame, Send → dither runs at
+  output resolution (visibly more detail than at 200×150).
+- Load a Phase-5-saved layout containing an image element → image
+  loads with the threshold-only path preserved; properties panel
+  shows `Algorithm: Threshold` (the migration path).
 
 ---
 
