@@ -26,6 +26,12 @@ void begin();
 // by /status; this module imports the helper from net.cpp via callback.
 void register_routes(AsyncWebServer& server);
 
+// Drives deferred work — currently the partial-content lock-in pass
+// that finishes a `?full=1` request after the synchronous all-white
+// pass + HTTP response have completed. Call from loop(). Cheap when
+// idle.
+void service();
+
 // Returns metadata for the most recently rendered frame, or nullopt if
 // none has been received since boot. Read by /status.
 std::optional<LastFrameMeta> last_meta();

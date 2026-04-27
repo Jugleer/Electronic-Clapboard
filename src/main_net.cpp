@@ -48,10 +48,27 @@ void setup() {
 
     net::begin();
     log_server::begin();
+
+    // Boot splash: wait briefly for Wi-Fi association so the IP is
+    // populated, then paint a "what was just flashed" screen with the
+    // firmware version. The wait is best-effort — if Wi-Fi takes
+    // longer than 8 s (wrong-password / AP down) we paint with
+    // "0.0.0.0" so the firmware version is at least on-screen.
+    net::wait_for_connection(8000);
+    display::show_boot_screen(
+#ifdef FIRMWARE_VERSION
+        FIRMWARE_VERSION,
+#else
+        "?",
+#endif
+        net::current_ip(),
+        net::current_hostname());
+    clap_log("[boot] splash painted");
 }
 
 void loop() {
     net::service();
     log_server::service();
+    frame::service();
     delay(50);
 }

@@ -1,45 +1,64 @@
+import Konva from "konva";
 import { useEffect, useRef, useState } from "react";
 
 import { DEFAULT_HOST, persistHost, resolveDefaultHost } from "./config";
-import { HEIGHT, WIDTH } from "./frameFormat";
+import { EditorCanvas } from "./editor/EditorCanvas";
+import { LayerPanel } from "./editor/LayerPanel";
+import { PropertiesPanel } from "./editor/PropertiesPanel";
+import { rasterizeElements } from "./editor/renderToCanvas";
+import { useEditorStore } from "./editor/store";
+import { GridControls } from "./editor/GridControls";
+import { GroupButtons } from "./editor/GroupButtons";
+import { HistoryButtons } from "./editor/HistoryButtons";
+import { Toolbar } from "./editor/Toolbar";
+import { useKeyboardShortcuts } from "./editor/useKeyboard";
 import { useFrameSink } from "./useFrameSink";
 
-// Phase 3 contract: ONE piece of placeholder text drawn by code, no editor
-// UI. Phase 4 introduces draggable text boxes etc.
-function drawPlaceholder(ctx: CanvasRenderingContext2D): void {
-  ctx.fillStyle = "white";
-  ctx.fillRect(0, 0, WIDTH, HEIGHT);
-
-  ctx.fillStyle = "black";
-  ctx.font = "bold 96px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("E-CLAPBOARD", WIDTH / 2, HEIGHT / 2 - 40);
-
-  ctx.font = "32px sans-serif";
-  ctx.fillText("Phase 3 — canvas → /frame", WIDTH / 2, HEIGHT / 2 + 50);
-
-  ctx.strokeStyle = "black";
-  ctx.lineWidth = 4;
-  ctx.strokeRect(20, 20, WIDTH - 40, HEIGHT - 40);
-}
-
 export function App() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stageRef = useRef<Konva.Stage | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [host, setHost] = useState<string>(() => resolveDefaultHost());
+  const [fullRefresh, setFullRefresh] = useState(false);
   const { status, error, lastResult, send } = useFrameSink({ host });
+  const elementCount = useEditorStore((s) => s.elements.length);
 
+  // After a successful ?full=1 response, the firmware still has a
+  // deferred partial-content lock-in pass running on its loop() task
+  // for ~1.5 s. The /frame endpoint returns 503 during that window if
+  // we Send again. Surface this as a transient "post-saturation in
+  // progress" hint so the user knows the round-trip isn't fully done.
+  // ESTIMATED_LOCKIN_MS errs slightly long; the editor's 503 retry
+  // covers any underestimate.
+  const ESTIMATED_LOCKIN_MS = 1800;
+  const [lockinUntil, setLockinUntil] = useState<number | null>(null);
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    drawPlaceholder(ctx);
-  }, []);
+    if (status === "done" && lastResult?.full_refresh) {
+      setLockinUntil(Date.now() + ESTIMATED_LOCKIN_MS);
+    }
+  }, [status, lastResult]);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (lockinUntil === null) return;
+    const remaining = lockinUntil - Date.now();
+    if (remaining <= 0) {
+      setLockinUntil(null);
+      return;
+    }
+    const id = window.setTimeout(() => setNow(Date.now()), 200);
+    return () => window.clearTimeout(id);
+  }, [lockinUntil, now]);
+  const lockinActive = lockinUntil !== null && now < lockinUntil;
+
+  useKeyboardShortcuts(editingId === null);
 
   const onSend = () => {
-    if (!canvasRef.current) return;
-    void send(canvasRef.current);
+    const elements = useEditorStore.getState().elements;
+    const canvas = rasterizeElements(elements);
+    // Firmware handles saturation lock-in itself on ?full=1 (white-
+    // flash full pass + content partial pass). No client-side
+    // double-send needed.
+    void send(canvas, { full: fullRefresh });
   };
 
   const onHostBlur = () => {
@@ -47,10 +66,18 @@ export function App() {
   };
 
   return (
-    <main style={{ fontFamily: "system-ui", padding: 24, lineHeight: 1.4 }}>
+    <main style={{ fontFamily: "system-ui", padding: 16, lineHeight: 1.4 }}>
       <h1 style={{ marginTop: 0 }}>Electronic Clapboard — editor</h1>
 
-      <section style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
+      <section
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          marginBottom: 12,
+          flexWrap: "wrap",
+        }}
+      >
         <label htmlFor="host" style={{ fontWeight: 600 }}>
           Target host:
         </label>
@@ -61,39 +88,63 @@ export function App() {
           onChange={(e) => setHost(e.target.value)}
           onBlur={onHostBlur}
           placeholder={DEFAULT_HOST}
-          style={{ fontFamily: "monospace", padding: "4px 8px", minWidth: 240 }}
+          style={{ fontFamily: "monospace", padding: "4px 8px", minWidth: 220 }}
         />
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}
+          title="Forces a clean refresh (?full=1) — ~4 s render, clears ghosting"
+        >
+          <input
+            type="checkbox"
+            checked={fullRefresh}
+            onChange={(e) => setFullRefresh(e.target.checked)}
+          />
+          full refresh
+        </label>
         <button
           type="button"
           onClick={onSend}
-          disabled={status === "sending"}
+          disabled={status === "sending" || elementCount === 0}
           style={{ padding: "8px 16px", fontSize: 16, fontWeight: 600 }}
         >
           {status === "sending" ? "Sending…" : "Send to clapboard"}
         </button>
         <StatusReadout status={status} error={error} lastResult={lastResult} />
+        {lockinActive ? (
+          <span style={{ color: "#a60", fontSize: 13 }}>
+            · panel locking in saturation…
+          </span>
+        ) : null}
       </section>
 
-      <canvas
-        ref={canvasRef}
-        width={WIDTH}
-        height={HEIGHT}
-        style={{
-          width: WIDTH,
-          height: HEIGHT,
-          border: "1px solid #888",
-          background: "white",
-          imageRendering: "pixelated",
-          maxWidth: "100%",
-        }}
-      />
-
-      <p style={{ color: "#666", marginTop: 12, fontSize: 13 }}>
-        Wire format: {WIDTH}×{HEIGHT}, 1bpp MSB-first, 1 = ink. Phase 3 packs
-        with a luminance threshold; Phase 6 will introduce Floyd-Steinberg
-        dithering. The canvas above is the exact 800×480 frame the firmware
-        will receive.
-      </p>
+      <section style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <Toolbar />
+            <HistoryButtons />
+            <GroupButtons />
+          </div>
+          <GridControls />
+          <EditorCanvas
+            stageRef={stageRef}
+            containerRef={containerRef}
+            editingId={editingId}
+            setEditingId={setEditingId}
+          />
+          <p style={{ color: "#666", margin: 0, fontSize: 12, maxWidth: 800 }}>
+            800×480 frame, 1bpp MSB-first, 1 = ink. Click a tool to add an
+            element; drag to move, drag corners to resize, double-click text
+            to edit. Shift+click and marquee-drag to multi-select. Hold Shift
+            while dragging to lock movement to an axis. Ctrl+Z / Ctrl+Y undo
+            and redo, Ctrl+D duplicates, Ctrl+A selects all, Ctrl+G groups
+            (Ctrl+Shift+G ungroups), Delete removes, arrow keys nudge.
+          </p>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 260 }}>
+          <PropertiesPanel />
+          <LayerPanel />
+        </div>
+      </section>
     </main>
   );
 }
@@ -114,7 +165,7 @@ function StatusReadout({
   if (status === "done" && lastResult) {
     return (
       <span style={{ color: "#070" }}>
-        ✓ rendered ({lastResult.render_ms} ms,{" "}
+        rendered ({lastResult.render_ms} ms,{" "}
         {lastResult.full_refresh ? "full" : "partial"})
       </span>
     );
@@ -122,7 +173,7 @@ function StatusReadout({
   if (status === "error" && error) {
     return (
       <span style={{ color: "#a00" }}>
-        ✗ {error.code}
+        {error.code}
         {error.httpStatus ? ` (HTTP ${error.httpStatus})` : ""}: {error.message}
       </span>
     );

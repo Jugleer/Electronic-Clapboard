@@ -7,6 +7,7 @@
 #include "clap_log.h"
 #include "display.h"
 #include "frame_validate.h"
+#include "lockin_state.h"
 
 namespace {
 
@@ -15,6 +16,22 @@ namespace {
 // and per-request thrash. /status reports ~8.36 MB PSRAM free, so failure
 // here is a programmer error, not a runtime condition we can recover from.
 uint8_t* g_buf = nullptr;
+
+// Deferred-render state. On a `?full=1` request the synchronous handler
+// runs the full-window all-white pass and sends the HTTP response, then
+// schedules the lockin via `g_lockin`. loop()'s frame::service() polls
+// `g_lockin.poll()` and runs the partial-content pass when the settle
+// window elapses. Splitting the two passes keeps any single AsyncTCP
+// block under ~4 s — sustained 6+ s blocks brownout / panic the chip
+// on this board, manifesting as a chip reset back to the boot screen.
+// The state-machine logic lives in lockin_state.h so it can be
+// unit-tested in [env:native] without Arduino / GxEPD2 pulled in.
+//
+// We need a separate buffer for the deferred pass because the next
+// /frame request might land on g_buf before service() runs. The lockin
+// buf is also in PSRAM (8 MB free, 48 KB is rounding noise).
+uint8_t* g_lockin_buf = nullptr;
+lockin::StateMachine g_lockin;
 
 // Async server can dispatch requests on AsyncTCP's task. The render itself
 // is synchronous and blocking inside the request handler — we accept the
@@ -188,9 +205,35 @@ void on_request_complete(AsyncWebServerRequest* request) {
     if (request->hasParam("full")) {
         full_refresh = (request->getParam("full")->value() == "1");
     }
-    const uint32_t t_start    = millis();
-    const uint32_t render_ms  = display::draw_frame(g_buf, full_refresh);
-    const uint32_t finished   = millis();
+    const uint32_t t_start = millis();
+    uint32_t       render_ms;
+
+    if (full_refresh) {
+        // Synchronous: full-window all-white pass (~3.5 s). This runs
+        // the panel's deep-refresh post-cycle against an empty
+        // framebuffer so it has nothing to lift. The partial content
+        // pass that actually shows the image is deferred to
+        // frame::service() below — keeping the handler under ~4 s
+        // avoids the chip-reset symptom we saw with a back-to-back
+        // double pass in this code path.
+        const uint32_t white_ms = display::draw_full_white();
+        render_ms = white_ms;
+
+        memcpy(g_lockin_buf, g_buf, FRAME_EXPECTED_BYTES);
+        g_lockin.schedule(millis(), white_ms);
+        // g_busy stays TRUE — the deferred pass still owns the panel.
+        // service() clears it after the partial pass completes. The
+        // ReqCtx busy-flag ownership transfers to the deferred pass:
+        // clear our local ownership so onDisconnect doesn't also
+        // clear g_busy if the connection drops.
+        c->owns_busy_flag = false;
+    } else {
+        render_ms = display::draw_partial_content(g_buf);
+        g_busy = false;
+        c->owns_busy_flag = false;
+    }
+
+    const uint32_t finished = millis();
 
     LastFrameMeta meta;
     meta.at_ms        = finished;
@@ -198,9 +241,6 @@ void on_request_complete(AsyncWebServerRequest* request) {
     meta.render_ms    = render_ms;
     meta.full_refresh = full_refresh;
     g_last_meta = meta;
-
-    g_busy = false;
-    c->owns_busy_flag = false;
 
     String body = "{\"ok\":true,\"bytes\":48000,\"render_ms\":";
     body += String(render_ms);
@@ -212,10 +252,11 @@ void on_request_complete(AsyncWebServerRequest* request) {
     apply_cors_headers(response);
     request->send(response);
 
-    clap_log("[frame] rendered bytes=48000 full=%d render_ms=%u (handler t=%u)",
+    clap_log("[frame] rendered bytes=48000 full=%d render_ms=%u (handler t=%u)%s",
              full_refresh ? 1 : 0,
              (unsigned) render_ms,
-             (unsigned) (finished - t_start));
+             (unsigned) (finished - t_start),
+             full_refresh ? " [partial lock-in deferred]" : "");
 }
 
 void on_options(AsyncWebServerRequest* request) {
@@ -232,8 +273,10 @@ namespace frame {
 void begin() {
     g_buf = static_cast<uint8_t*>(
         heap_caps_malloc(FRAME_EXPECTED_BYTES, MALLOC_CAP_SPIRAM));
-    if (g_buf == nullptr) {
-        clap_log("[frame] FATAL: PSRAM allocation of %u bytes failed",
+    g_lockin_buf = static_cast<uint8_t*>(
+        heap_caps_malloc(FRAME_EXPECTED_BYTES, MALLOC_CAP_SPIRAM));
+    if (g_buf == nullptr || g_lockin_buf == nullptr) {
+        clap_log("[frame] FATAL: PSRAM allocation of 2x%u bytes failed",
                  (unsigned) FRAME_EXPECTED_BYTES);
         // No recovery path — without the buffer there is no /frame.
         // Halt loudly so the user sees the failure on serial/TCP log.
@@ -242,9 +285,31 @@ void begin() {
             clap_log("[frame] halted: cannot allocate frame buffer");
         }
     }
-    memset(g_buf, 0x00, FRAME_EXPECTED_BYTES);  // start all-white
-    clap_log("[frame] PSRAM buffer ready: %u bytes",
+    memset(g_buf, 0x00, FRAME_EXPECTED_BYTES);
+    memset(g_lockin_buf, 0x00, FRAME_EXPECTED_BYTES);
+    clap_log("[frame] PSRAM buffers ready: 2x%u bytes",
              (unsigned) FRAME_EXPECTED_BYTES);
+}
+
+void service() {
+    if (g_lockin.poll(millis()) != lockin::Action::RunLockin) return;
+
+    const uint32_t partial_ms = display::draw_partial_content(g_lockin_buf);
+    g_lockin.finalize(partial_ms);
+    g_busy = false;
+
+    // Refresh /status with the *combined* timing so the editor's last
+    // result reflects what the user actually saw on the panel.
+    if (g_last_meta) {
+        LastFrameMeta meta = *g_last_meta;
+        meta.render_ms = g_lockin.combined_render_ms();
+        meta.at_ms     = millis();
+        g_last_meta = meta;
+    }
+
+    clap_log("[frame] full-refresh lock-in done: white=%u ms, partial=%u ms",
+             (unsigned) g_lockin.white_ms(),
+             (unsigned) partial_ms);
 }
 
 void register_routes(AsyncWebServer& server) {

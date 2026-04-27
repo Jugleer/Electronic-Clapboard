@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(pio test *)",
-      "Bash(pio run *)"
+      "Bash(pio run *)",
+      "Bash(npm view *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

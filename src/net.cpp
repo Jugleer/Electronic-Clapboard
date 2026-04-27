@@ -172,4 +172,24 @@ void service() {
     was_connected = connected;
 }
 
+bool wait_for_connection(uint32_t timeout_ms) {
+    const uint32_t deadline = millis() + timeout_ms;
+    while (WiFi.status() != WL_CONNECTED) {
+        if ((int32_t)(millis() - deadline) >= 0) return false;
+        delay(100);
+    }
+    return true;
+}
+
+const char* current_ip() {
+    static char buf[16];
+    IPAddress ip = WiFi.localIP();
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    return buf;
+}
+
+const char* current_hostname() {
+    return MDNS_HOSTNAME;
+}
+
 }  // namespace net
