@@ -31,6 +31,15 @@ export function App() {
   const [imageError, setImageError] = useState<string | null>(null);
   const { status, error, lastResult, send } = useFrameSink({ host });
   const elementCount = useEditorStore((s) => s.elements.length);
+  // Image elements need a ?full=1 refresh to render properly — partial
+  // updates leave grey ghosting on photographic content because the
+  // panel's mid-tone equalisation only runs in the full-refresh
+  // post-cycle. Force the toggle on (and disable it) whenever any
+  // image element is in the layout.
+  const hasImage = useEditorStore((s) =>
+    s.elements.some((el) => el.type === "image"),
+  );
+  const effectiveFullRefresh = fullRefresh || hasImage;
 
   const onPickFile = (mode: "fit" | "background"): React.ChangeEventHandler<HTMLInputElement> =>
     async (e) => {
@@ -88,7 +97,7 @@ export function App() {
   const onSend = () => {
     const elements = useEditorStore.getState().elements;
     const canvas = rasterizeElements(elements);
-    void send(canvas, { full: fullRefresh });
+    void send(canvas, { full: effectiveFullRefresh });
   };
 
   useKeyboardShortcuts(editingId === null, onSend);
@@ -139,15 +148,29 @@ export function App() {
           style={{ fontFamily: "monospace", padding: "4px 8px", minWidth: 220 }}
         />
         <label
-          style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13 }}
-          title="Forces a clean refresh (?full=1) — ~4 s render, clears ghosting"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: 13,
+            color: hasImage ? "#666" : undefined,
+          }}
+          title={
+            hasImage
+              ? "Forced on: image elements need a full refresh to render without ghosting"
+              : "Forces a clean refresh (?full=1) — ~4 s render, clears ghosting"
+          }
         >
           <input
             type="checkbox"
-            checked={fullRefresh}
+            checked={effectiveFullRefresh}
+            disabled={hasImage}
             onChange={(e) => setFullRefresh(e.target.checked)}
           />
           full refresh
+          {hasImage ? (
+            <span style={{ fontSize: 11, color: "#888" }}>(image present)</span>
+          ) : null}
         </label>
         <button
           type="button"
@@ -273,10 +296,21 @@ function StatusReadout({
     );
   }
   if (status === "error" && error) {
+    // From a browser, an asleep device looks identical to "off" or "on a
+    // different network" — the TCP connection just refuses or times out.
+    // Surface a hint so the user thinks of the wake button before the
+    // router. The firmware's deep-sleep arms ext0 wake on PIN_WAKE_BUTTON
+    // (see src/power.cpp); a single press wakes the device.
+    const looksAsleep = error.code === "network" || error.code === "timeout";
     return (
       <span style={{ color: "#a00" }}>
         {error.code}
         {error.httpStatus ? ` (HTTP ${error.httpStatus})` : ""}: {error.message}
+        {looksAsleep ? (
+          <span style={{ color: "#666", marginLeft: 6 }}>
+            · is the device awake? press the wake button
+          </span>
+        ) : null}
       </span>
     );
   }
