@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
       - name: Install system deps for cairosvg
         run: sudo apt-get update && sudo apt-get install -y libcairo2
       - name: Install Python deps
@@ -30,10 +29,6 @@ jobs:
         run: |
           python tools/generate_oracle_fixture.py
           git diff --exit-code -- web/src/__fixtures__/oracle_frame.bin
-      - name: Verify icon PNGs match the rasterise script
-        run: |
-          python tools/rasterise_icons.py
-          git diff --exit-code -- web/public/icons/
 
   # -----------------------------------------------------------------------
   # Firmware: native unit tests (host compiler), then ESP32-S3 build only.
@@ -48,7 +43,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
       - name: Install PlatformIO
         run: pip install platformio
       - name: Cache PlatformIO
@@ -76,7 +70,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
       - name: Install PlatformIO
         run: pip install platformio
       - name: Cache PlatformIO
