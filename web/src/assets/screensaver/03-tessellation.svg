@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" width="800" height="480">
+  <rect width="800" height="480" fill="#ffffff"/>
+
+  <!-- Hexagonal tessellation that flips fill polarity left → right.
+       Inspired by Escher's Metamorphosis series — a repeating shape
+       that gradually inverts as the eye scans the field. EPD-friendly
+       (pure 2-tone, no gradients). -->
+  <defs>
+    <pattern id="hexpat" x="0" y="0" width="60" height="52" patternUnits="userSpaceOnUse">
+      <polygon points="30,0 60,17 60,35 30,52 0,35 0,17" fill="#000"/>
+      <polygon points="30,4 56,19 56,33 30,48 4,33 4,19" fill="#fff"/>
+      <polygon points="30,12 48,22 48,30 30,40 12,30 12,22" fill="#000"/>
+    </pattern>
+    <pattern id="hexpat2" x="0" y="0" width="60" height="52" patternUnits="userSpaceOnUse">
+      <polygon points="30,0 60,17 60,35 30,52 0,35 0,17" fill="#fff"/>
+      <polygon points="30,4 56,19 56,33 30,48 4,33 4,19" fill="#000"/>
+      <polygon points="30,12 48,22 48,30 30,40 12,30 12,22" fill="#fff"/>
+    </pattern>
+    <linearGradient id="reveal" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#000"/>
+      <stop offset="50%" stop-color="#000"/>
+      <stop offset="55%" stop-color="#fff"/>
+      <stop offset="100%" stop-color="#fff"/>
+    </linearGradient>
+    <mask id="revealMask">
+      <rect width="800" height="480" fill="url(#reveal)"/>
+    </mask>
+  </defs>
+
+  <!-- Layer A: positive-polarity hexes everywhere -->
+  <rect width="800" height="480" fill="url(#hexpat)"/>
+  <!-- Layer B: inverted hexes, masked to right half -->
+  <rect width="800" height="480" fill="url(#hexpat2)" mask="url(#revealMask)"/>
+</svg>

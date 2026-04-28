@@ -2,6 +2,7 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { findIcon } from "./icons/registry";
 import { useEditorStore } from "./store";
+import { paletteFor, useThemeStore } from "./themeStore";
 import type { Element, GroupId } from "./types";
 
 function describe(el: Element): string {
@@ -78,22 +79,39 @@ export function LayerPanel(): JSX.Element {
   const isolateGroup = useEditorStore((s) => s.isolateGroup);
   const ungroupSelected = useEditorStore((s) => s.ungroupSelected);
 
+  const themeMode = useThemeStore((s) => s.mode);
+  const palette = paletteFor(themeMode);
+  const isDark = themeMode === "dark";
+  // Per-row accent shading. Light mode picks pale blues/yellows; dark
+  // mode lifts to muted teals/ambers so contrast stays readable on the
+  // dark surface without losing the "selected vs isolated vs group"
+  // signal that light mode communicated.
+  const groupSelectedBg = isDark ? "#1f4a64" : "#cef";
+  const groupIsolatedBg = isDark ? "#5a4a18" : "#ffe9b8";
+  const groupBg = isDark ? "#2a2c44" : "#eef";
+  const memberSelectedBg = isDark ? "#1f4459" : "#def";
+  const memberDivider = isDark ? "#444856" : "#cce";
+  const groupAccent = isDark ? "#7da6c8" : "#58a";
+
   const rows = buildRows(elements);
   const selectedSet = new Set(selectedIds);
 
   return (
     <div
       style={{
-        border: "1px solid #ccc",
-        background: "#fafafa",
+        border: `1px solid ${palette.panelBorder}`,
+        background: palette.panelBg,
+        color: palette.text,
         padding: 8,
         minWidth: 280,
         fontSize: 13,
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>Layers</div>
+      <div style={{ fontWeight: 600, marginBottom: 8, color: palette.textHeading }}>
+        Layers
+      </div>
       {rows.length === 0 ? (
-        <div style={{ color: "#888" }}>No elements yet.</div>
+        <div style={{ color: palette.textMuted }}>No elements yet.</div>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
           {rows.map((row) => {
@@ -111,14 +129,14 @@ export function LayerPanel(): JSX.Element {
                     alignItems: "center",
                     padding: "4px 6px",
                     background: allSelected
-                      ? "#cef"
+                      ? groupSelectedBg
                       : isIsolated
-                        ? "#ffe9b8"
-                        : "#eef",
+                        ? groupIsolatedBg
+                        : groupBg,
                     borderRadius: 3,
                     cursor: "pointer",
                     fontWeight: 600,
-                    borderLeft: "3px solid #58a",
+                    borderLeft: `3px solid ${groupAccent}`,
                   }}
                   onClick={() => {
                     isolateGroup(null);
@@ -158,10 +176,10 @@ export function LayerPanel(): JSX.Element {
                   alignItems: "center",
                   padding: "4px 6px",
                   paddingLeft: isMember ? 22 : 6,
-                  background: isSelected ? "#def" : "transparent",
+                  background: isSelected ? memberSelectedBg : "transparent",
                   borderRadius: 3,
                   cursor: "pointer",
-                  borderLeft: isMember ? "3px solid #cce" : undefined,
+                  borderLeft: isMember ? `3px solid ${memberDivider}` : undefined,
                 }}
                 onClick={(e: ReactMouseEvent) =>
                   selectElement(el.id, e.shiftKey || e.ctrlKey || e.metaKey)
@@ -230,7 +248,7 @@ export function LayerPanel(): JSX.Element {
         </ul>
       )}
       {isolatedGroupId !== null ? (
-        <div style={{ marginTop: 8, fontSize: 11, color: "#a60" }}>
+        <div style={{ marginTop: 8, fontSize: 11, color: palette.statusWarn }}>
           Editing group members individually — click outside the group, press
           Esc, or double-click the group header to exit.
         </div>

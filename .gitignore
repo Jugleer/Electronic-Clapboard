@@ -61,6 +61,11 @@ web/node_modules/
 web/dist/
 web/coverage/
 
+# Personal screensaver scans — copyrighted material the user owns but
+# shouldn't redistribute via the repo (e.g. M.C. Escher prints, in
+# copyright until ~2042). Use the `personal-*` prefix to keep them local.
+web/src/assets/screensaver/personal-*
+
 # Claude Code — user-local settings (commands/ is shared)
 .claude/settings.local.json
 

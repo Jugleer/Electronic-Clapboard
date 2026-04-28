@@ -1,5 +1,6 @@
 import { ICON_CATEGORIES, ICON_REGISTRY } from "./icons/registry";
 import { useEditorStore } from "./store";
+import { usePalette } from "./themeStore";
 import {
   clampTextSize,
   cssFontFamily,
@@ -31,22 +32,26 @@ export function PropertiesPanel(): JSX.Element {
   const updateImage = useEditorStore((s) => s.updateImage);
   const rotateElement = useEditorStore((s) => s.rotateElement);
   const fonts = useSystemFonts();
+  const palette = usePalette();
 
   return (
     <div
       style={{
-        border: "1px solid #ccc",
-        background: "#fafafa",
+        border: `1px solid ${palette.panelBorder}`,
+        background: palette.panelBg,
+        color: palette.text,
         padding: 8,
         minWidth: 260,
         fontSize: 13,
       }}
     >
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>Properties</div>
+      <div style={{ fontWeight: 600, marginBottom: 8, color: palette.textHeading }}>
+        Properties
+      </div>
       {selectedIds.length === 0 ? (
-        <div style={{ color: "#888" }}>Select an element.</div>
+        <div style={{ color: palette.textMuted }}>Select an element.</div>
       ) : selectedIds.length > 1 ? (
-        <div style={{ color: "#444" }}>
+        <div style={{ color: palette.text }}>
           {selectedIds.length} elements selected — group move/delete/duplicate
           available; per-element styling requires a single selection.
         </div>
@@ -122,14 +127,14 @@ export function PropertiesPanel(): JSX.Element {
             </button>
           ) : null}
           {!fonts.supported ? (
-            <div style={{ color: "#888", fontSize: 11 }}>
+            <div style={{ color: palette.textMuted, fontSize: 11 }}>
               Local Font Access unavailable in this browser — type any
               installed font name and it will be used if the OS resolves
               it.
             </div>
           ) : null}
           {fonts.status === "ready" ? (
-            <div style={{ color: "#070", fontSize: 11 }}>
+            <div style={{ color: palette.statusOk, fontSize: 11 }}>
               {fonts.families.length} system fonts available.
             </div>
           ) : null}
@@ -172,8 +177,9 @@ export function PropertiesPanel(): JSX.Element {
               style={{
                 padding: "2px 10px",
                 fontWeight: "bold",
-                background: element.bold ? "#def" : undefined,
-                border: element.bold ? "1px solid #0a7" : "1px solid #bbb",
+                color: palette.text,
+                background: element.bold ? palette.buttonBgActive : palette.buttonBg,
+                border: `1px solid ${element.bold ? palette.link : palette.buttonBorder}`,
                 minWidth: 32,
               }}
             >
@@ -187,8 +193,9 @@ export function PropertiesPanel(): JSX.Element {
               style={{
                 padding: "2px 10px",
                 fontStyle: "italic",
-                background: element.italic ? "#def" : undefined,
-                border: element.italic ? "1px solid #0a7" : "1px solid #bbb",
+                color: palette.text,
+                background: element.italic ? palette.buttonBgActive : palette.buttonBg,
+                border: `1px solid ${element.italic ? palette.link : palette.buttonBorder}`,
                 minWidth: 32,
               }}
             >
@@ -226,7 +233,7 @@ export function PropertiesPanel(): JSX.Element {
                 }
                 style={{ width: 140 }}
               />{" "}
-              <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
+              <span style={{ color: palette.textMuted, fontVariantNumeric: "tabular-nums" }}>
                 {element.threshold}
               </span>
             </label>
@@ -244,7 +251,7 @@ export function PropertiesPanel(): JSX.Element {
               }
               style={{ width: 140 }}
             />{" "}
-            <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
+            <span style={{ color: palette.textMuted, fontVariantNumeric: "tabular-nums" }}>
               {element.brightness}
             </span>
           </label>
@@ -261,7 +268,7 @@ export function PropertiesPanel(): JSX.Element {
               }
               style={{ width: 140 }}
             />{" "}
-            <span style={{ color: "#666", fontVariantNumeric: "tabular-nums" }}>
+            <span style={{ color: palette.textMuted, fontVariantNumeric: "tabular-nums" }}>
               {element.contrast}
             </span>
           </label>
@@ -273,7 +280,7 @@ export function PropertiesPanel(): JSX.Element {
             />{" "}
             Invert
           </label>
-          <div style={{ color: "#888", fontSize: 11 }}>
+          <div style={{ color: palette.textMuted, fontSize: 11 }}>
             Preview shows the un-dithered source — click Send to see
             the actual {element.algorithm === "fs" ? "Floyd-Steinberg" : "thresholded"}{" "}
             output on the panel.
@@ -307,7 +314,7 @@ export function PropertiesPanel(): JSX.Element {
             />{" "}
             Invert ink
           </label>
-          <div style={{ color: "#888", fontSize: 11 }}>
+          <div style={{ color: palette.textMuted, fontSize: 11 }}>
             Icons have transparent backgrounds — invert flips the
             stroke from black to white without filling the surround.
             Preview dims to 50% as a hint; click Send to see the
@@ -386,7 +393,7 @@ export function PropertiesPanel(): JSX.Element {
         </div>
       ) : null}
       {element ? (
-        <div style={{ marginTop: 10, color: "#666", fontSize: 11 }}>
+        <div style={{ marginTop: 10, color: palette.textMuted, fontSize: 11 }}>
           {Math.round(element.x)}, {Math.round(element.y)} ·{" "}
           {Math.round(element.w)} × {Math.round(element.h)}
           {element.rotation ? ` · ${Math.round(element.rotation)}°` : ""}

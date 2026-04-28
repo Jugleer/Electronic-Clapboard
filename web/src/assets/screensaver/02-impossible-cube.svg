@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" width="800" height="480">
+  <rect width="800" height="480" fill="#ffffff"/>
+
+  <!-- Impossible cube: a wireframe cube where two of the back-edges are
+       drawn passing IN FRONT of the front-edges. Pure stroke art, all
+       straight lines, very EPD-friendly. -->
+  <g transform="translate(400 240)" stroke="#000" stroke-width="6" fill="none" stroke-linecap="square">
+    <!-- Front face -->
+    <rect x="-130" y="-130" width="260" height="260"/>
+    <!-- Back face (offset up-right) -->
+    <rect x="-30" y="-200" width="260" height="260"/>
+    <!-- Connectors -->
+    <line x1="-130" y1="-130" x2="-30" y2="-200"/>
+    <line x1="130"  y1="-130" x2="230" y2="-200"/>
+    <line x1="130"  y1="130"  x2="230" y2="60"/>
+    <!-- Impossible: this connector passes IN FRONT of the front-face's
+         left edge, breaking spatial consistency -->
+    <line x1="-30" y1="60" x2="-130" y2="130" stroke-width="6"/>
+    <!-- White cover-up at the impossible crossing -->
+    <rect x="-50" y="50" width="50" height="20" fill="#ffffff" stroke="none"/>
+    <line x1="-30" y1="60" x2="-130" y2="130"/>
+  </g>
+
+  <!-- Caption strip at the bottom -->
+  <g font-family="Georgia, serif" fill="#000" text-anchor="middle">
+    <text x="400" y="450" font-size="18" font-style="italic">an impossible cube</text>
+  </g>
+</svg>

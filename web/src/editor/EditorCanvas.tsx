@@ -24,6 +24,7 @@ import { getCachedIcon } from "./icons/loader";
 import { getCachedImage } from "./imageCache";
 import { useEditorStore } from "./store";
 import { TextEditorOverlay } from "./TextEditorOverlay";
+import { usePalette } from "./themeStore";
 import { useDitheredImagePreview } from "./useDitheredImagePreview";
 import { cssFontFamily } from "./types";
 import type {
@@ -72,6 +73,7 @@ export function EditorCanvas({
   const snapEnabled = useGridStore((s) => s.snapEnabled);
   const gridVisible = useGridStore((s) => s.visible);
   const borderWidth = useGridStore((s) => s.borderWidth);
+  const palette = usePalette();
   const stageW = WIDTH + 2 * borderWidth;
   const stageH = HEIGHT + 2 * borderWidth;
   const snapXY = (p: { x: number; y: number }) => ({
@@ -176,7 +178,11 @@ export function EditorCanvas({
         position: "relative",
         width: stageW,
         height: stageH,
-        border: "1px solid #888",
+        // Canvas paper stays white in both themes — it visualises the
+        // EPD's bistable display, not the surrounding chrome. The
+        // outer ring uses the chrome's border colour so the canvas
+        // doesn't read as a hard cut-out in dark mode.
+        border: `1px solid ${palette.panelBorder}`,
         background: "white",
         maxWidth: "100%",
       }}
@@ -324,7 +330,7 @@ export function EditorCanvas({
               y={0}
               width={stageW}
               height={borderWidth}
-              fill="white"
+              fill={palette.borderWashFill}
               opacity={0.5}
             />
             <KRect
@@ -332,7 +338,7 @@ export function EditorCanvas({
               y={borderWidth + HEIGHT}
               width={stageW}
               height={borderWidth}
-              fill="white"
+              fill={palette.borderWashFill}
               opacity={0.5}
             />
             <KRect
@@ -340,7 +346,7 @@ export function EditorCanvas({
               y={borderWidth}
               width={borderWidth}
               height={HEIGHT}
-              fill="white"
+              fill={palette.borderWashFill}
               opacity={0.5}
             />
             <KRect
@@ -348,7 +354,7 @@ export function EditorCanvas({
               y={borderWidth}
               width={borderWidth}
               height={HEIGHT}
-              fill="white"
+              fill={palette.borderWashFill}
               opacity={0.5}
             />
             <KRect
@@ -356,7 +362,7 @@ export function EditorCanvas({
               y={borderWidth}
               width={WIDTH}
               height={HEIGHT}
-              stroke="#888"
+              stroke={palette.borderStroke}
               strokeWidth={2}
               dash={[6, 4]}
               fillEnabled={false}
@@ -376,9 +382,11 @@ export function EditorCanvas({
 }
 
 function GridDots({ spacing }: { spacing: number }): JSX.Element {
-  // Draw grid intersections as 1 px dots. At small spacings this gets
-  // dense (10 px → 38400 dots) but Konva handles it; the layer is
-  // listening:false so it doesn't affect hit-testing.
+  // Draw grid intersections as 2×2 px dots in `#666` — high enough
+  // contrast against the white canvas to be unmistakable, low enough
+  // that the dot grid doesn't become visual noise. At small spacings
+  // this gets dense (10 px → 38400 dots) but Konva handles it; the
+  // layer is listening:false so it doesn't affect hit-testing.
   const cols = Math.floor(WIDTH / spacing);
   const rows = Math.floor(HEIGHT / spacing);
   const points: number[] = [];
@@ -407,9 +415,9 @@ function GridDots({ spacing }: { spacing: number }): JSX.Element {
       // Hack: forcing dash pattern of [0, spacing*2] effectively shows
       // a dot every other point; not what we want. Use sceneFunc.
       sceneFunc={(ctx, shape) => {
-        ctx.fillStyle = "#bbb";
+        ctx.fillStyle = "#666";
         for (let i = 0; i < points.length; i += 2) {
-          ctx.fillRect(points[i], points[i + 1], 1, 1);
+          ctx.fillRect(points[i] - 1, points[i + 1] - 1, 2, 2);
         }
         ctx.fillStrokeShape(shape);
       }}
