@@ -96,6 +96,14 @@ USB_D+:  GPIO 20
 - After any logical unit of work (passing tests + clean diff scoped to one concern), invoke /commit before starting the next task.
 - Don't batch unrelated changes across multiple concerns into one commit cycle.
 
+### Push policy (Claude is allowed)
+- After a successful `/commit` cycle on `main`, Claude may run `git push` without asking — this is a deliberate carve-out from the harness's default "ask before push". The user has authorised the standing instruction in this `CLAUDE.md`.
+- Push to the current upstream only (`git push`, or `git push -u origin <branch>` if no upstream is set yet on a feature branch). Never `git push --force` and never push to any remote other than `origin`. If the push is rejected (diverged history, protected branch, hook), report the error and stop — never force-push to recover.
+- Never push uncommitted work, never push commits made via `--no-verify`, never push commits that include files matching the `Never commit secrets…` rule above.
+- Never push on a feature branch the user is actively bisecting / rebasing — if you see in-progress rebase/cherry-pick state (`.git/rebase-*`, `.git/CHERRY_PICK_HEAD`), stop and surface the state to the user.
+- Pushing on `main` is fine for this project (small team, fast iteration); the protected-branch / force-push prohibitions still apply.
+- If asked to "commit and push" or "/commit then push", treat that as one operation: run /commit first, verify it succeeded cleanly, then push.
+
 ## Repository structure (current, post-Phase 5)
 
 The repo evolved from "single-firmware ESP32 project" into "ESP32
