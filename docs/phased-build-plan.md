@@ -1322,6 +1322,164 @@ Firmware was untouched (`firmware_version` stays 0.2.3).
 ### Hand-off
 v1 is shippable.
 
+### Phase 7 implementation notes (read me before Phase 8+)
+
+Phase 7a (save/load) landed; `/sync` deferred to a later phase since
+the hardware bench gates aren't a Phase-7 dependency. The 3-slot
+localStorage layout manager is gone; the editor now has unbounded
+named layouts in IndexedDB plus per-layout JSON export/import.
+Firmware was untouched.
+
+#### Storage backend
+
+1. **idb-keyval (6.2.2) over hand-rolled IDB.** `web/src/editor/layoutStore.ts`
+   wraps the keyval API: one entry per layout keyed by uuid plus a
+   `__index` entry holding `LayoutSummary[]` (id/name/savedAt/thumbnail
+   only) so the picker renders without paying to deserialise every
+   layout's elements. The index is reconciled against the actual key
+   set on every `listLayouts()` call — partial saves (browser killed
+   between idbSet(layout) and idbSet(index)) self-heal on the next
+   list. Cost: one extra `idbKeys()` call per list, negligible.
+
+2. **Per-layout entries (not one big blob).** Rename and delete don't
+   touch other layouts; per-value size limits stay polite even with a
+   slate that has 20× 1080p photos at ~3 MB base64 each. Tradeoff: the
+   index can drift, hence the reconcile pass.
+
+#### Schema
+
+3. **Schema bumped to v3.** `web/src/editor/layoutSchema.ts` is the
+   single source of truth for parse/validate. The Phase-6 image-element
+   field migration moved here as `migrateElement`/`migrateElements`,
+   shared by the IDB load path, the JSON import path, and the
+   localStorage→IDB migrator. Bumping was necessary (storage backend +
+   slot model both changed) but the format is reachable from any v2/v1
+   user via the migrator below — no "unsupported format" dialog.
+
+4. **One-shot localStorage→IDB migration.** `web/src/editor/layoutMigrate.ts`
+   reads the legacy `clapboard.layout.slots` (v2) blob, imports each
+   occupied slot as its own v3 layout (with element-field migration),
+   then deletes the legacy keys. Idempotent — runs on every
+   `LayoutButtons` mount; no-op once the keys are gone. v1 single-slot
+   path is supported for users who skipped Phase 5. Malformed legacy
+   blobs are left alone, not deleted, so a future session might recover
+   them. Empty slots simply disappear: Phase 7's "unbounded named
+   layouts" model has no concept of an empty placeholder.
+
+5. **Schema-version mismatch surfaces a user-readable message** via
+   `LayoutSchemaError`. `parseLayoutRecord` is what the import path
+   uses; rejecting v1, v2, or future versions with
+   `"unsupported schema version N (expected 3). Re-export from a newer
+   build, or upgrade this editor."`
+
+#### Export / import
+
+6. **Plain JSON, one layout per file.** `exportLayoutJson(id)` returns
+   `{filename, json}` where `filename = slate-<sanitised-name>-<YYYYMMDD>.json`
+   and `json = JSON.stringify(record, null, 2)`. The downloaded blob
+   already validates as a v3 record — `importLayoutJson` runs it
+   through `parseLayoutRecord` directly. By default import mints a
+   fresh id so re-importing the same file produces two layouts;
+   `{freshId: false}` overrides for advanced users / tests.
+
+7. **No magic header on the export format.** `schemaVersion` in the
+   blob is the contract. A 10 MB image-heavy slate exports fine; the
+   plan's "no need to compress" call held up.
+
+#### UI
+
+8. **Picker UX preserved.** Hover-thumbnail and inline rename survive
+   from the 3-slot LayoutButtons. Added: scrollable list (max-height
+   280 px), `+ new` (prompts for name, captures thumbnail from the
+   current canvas), `import` (file input), per-row `load` / `save`
+   (overwrite, with confirm) / `↓` (export) / `×` (delete, with
+   confirm). Search filter appears once the list grows past 6 entries
+   to keep the panel calm at low N.
+
+9. **Two-stage destructive-action gating.** Both delete and overwrite
+   use `window.confirm` since they're permanent and the prior 3-slot
+   UI gave users no equivalent rope to hang themselves with. Acceptable
+   for v1; a 2-click pattern is the upgrade path if confirm dialogs
+   feel heavy in practice.
+
+10. **Migration runs on first picker mount.** Not on App mount — keeps
+    the concern co-located with the only consumer that cares. Picker
+    re-lists once migration completes.
+
+#### Test totals after Phase 7
+
+- **vitest: 241 cases** across 18 files (23 layoutSchema, 22
+  layoutStore, 8 layoutMigrate, 14 LayoutButtons; 14 retired with
+  layoutSlot.test.ts; 188 carried from Phase 6).
+- **Native Unity: 67 cases** unchanged (no firmware change).
+- New devDeps: `idb-keyval@6.2.2`, `fake-indexeddb@6.0.0`,
+  `@testing-library/react@16.1.0`, `@testing-library/dom@10.4.0`.
+- `npm run typecheck`, `npm run lint`, `npm run build`
+  (~510 KB / 161 KB gz; +25 KB / +9 KB gz vs. Phase 6, all from
+  idb-keyval + RTL): green.
+- `pio run -e esp32s3-net` (RAM 29.0%, Flash 12.2%) and
+  `pio run -e esp32s3` (typewriter canary): both build clean.
+
+#### Bench acceptance — Gate L (post-Phase-7; run on hardware after merge)
+
+- Open editor on a Phase-6 user's browser → existing 3 slots show up
+  by name in the new picker (migration ran), legacy
+  `clapboard.layout.slots` key gone from devtools localStorage.
+- Save a layout with several photo elements (e.g. 3× 1080p uploads),
+  click `+ new`, hard-reload the page, click `load` on the new row →
+  canvas re-renders identically; Send to panel → matches.
+- Click `↓` on a layout → JSON file downloads with
+  `slate-<name>-<YYYYMMDD>.json` naming; re-import via `import` on a
+  fresh browser profile → identical canvas, identical Send result.
+- Delete a layout, accept the confirm → row disappears, refresh →
+  still gone.
+- Cancel a delete confirm → layout untouched.
+- Save 8 layouts → search input appears; filter narrows the list.
+- Try to import a v2 layout JSON (hand-crafted) → toast surfaces
+  "unsupported schema version 2 (expected 3)…", picker unchanged.
+
+---
+
+## Phase 8 — Sleep / wake architecture ⏳ **code landed; hardware bench pending**
+
+**Slice delivered:** A wake button puts the device into deep-sleep on a long-press; pressing the button wakes it again. While asleep, the EPD logic rail is power-gated (image retained), MOSFET gates are LOW, Wi-Fi is off, current draw drops toward the buck quiescent floor. While awake, a status LED is lit. Nothing else changes — the existing `/frame`, `/status`, editor flow all work identically once awake.
+
+This phase is the prerequisite for Phase 9 (untethered screensaver cycling).
+
+### What lands
+- Wake button on **GPIO 2** (button-to-GND, internal pull-up; pressed = LOW). RTC-IO capable for ext0 deep-sleep wake.
+- Status LED on **GPIO 21** (HIGH = awake). Avoids the GPIO 3 ROM-message strapping pin and the GPIO 13 SPI-MISO default (an earlier attempt on GPIO 13 was silently overridden by `SPI.begin()` during `display::begin()`).
+- `src/power_state.h` — pure header-only `ButtonTracker` (debounce + long-press) linked into `[env:native]`. Mirrors the `lockin_state.h` pattern.
+- `src/power.{h,cpp}` — Arduino-side wake-reason classification, button polling, deep-sleep entry. Drops MOSFET gates LOW + `display::power_off()` before `esp_deep_sleep_start()`.
+- `display::power_off()` helper (drops `PIN_EPD_PWR` LOW; image retained).
+- `main_net.cpp` calls `power::begin()` after rails-low and `power::service()` from `loop()`. Boot splash skipped on timer-wake (Phase 9 hook; never fires in Phase 8).
+- Editor surfaces "is the device awake? press the wake button" hint on `network` / `timeout` errors (in [App.tsx:StatusReadout](../web/src/App.tsx)).
+- `firmware_version` bumped to `0.3.0`.
+- `protocol.md §2.5` documents observed sleep/wake behaviour for clients.
+
+### Acceptance tests
+- **Native** (landed): `test_power_state` — 11 cases covering debounce promotion, long-press one-shot, re-arm after release, glitchy mid-hold tolerance, millis() rollover.
+- **Hardware (pending bench)**:
+  - **Gate K1 — wake from cold boot.** Power on, status LED comes on, splash paints with firmware 0.3.0, `/status` reachable.
+  - **Gate K2 — long-press to sleep.** Hold button ~1 s while awake. LED blinks 3× then goes dark. EPD goes blank in driver-board terms but the splash *remains visible* (bistable retention). `ping clapboard.local` fails.
+  - **Gate K3 — wake from sleep.** Single press of button. LED on within ~100 ms. ~5–8 s later splash repaints with the new IP, `/status` reachable. Wake reason in serial / TCP log says `button`.
+  - **Gate K4 — current draw asleep.** Multimeter on the 3S pack: expect ~0.3 mA with a low-Iq buck (the user is sourcing one), or ~3 mA with a typical hobby buck. Either way: at least an order of magnitude below awake draw.
+  - **Gate K5 — current draw awake.** Multimeter on the 3S pack idle (no `/frame` traffic): expect ~16 mA (~25 mA on 3.3 V via the buck, plus ~5 mA LED, plus buck quiescent).
+  - **Gate K6 — MOSFET gates verified LOW across sleep.** Scope on `PIN_LED_GATE` and `PIN_SOLENOID_GATE` during the LED-blink-into-sleep transition. Both must stay LOW.
+  - **Gate K7 — `/frame` works post-wake.** After wake, send a frame from the editor; renders normally. No regression vs. pre-Phase-8 behaviour.
+  - **Gate K8 — long-press during render.** Send a `?full=1` frame, mid-render hold the button. Sleep should fire after the render completes (the loop is blocked during the synchronous render, so service() can't sample). Acceptable — user shouldn't sleep mid-take anyway.
+
+### Risks (already considered)
+- **Holding button at boot.** If the user holds the button across power-on, the wake itself is hardware-driven; once awake, after ~1 s of held button the device sleeps again. Net: holding from boot for >1 s puts the device back to sleep. Documented behaviour, not a bug.
+- **Strapping pins.** GPIO 3 was rejected for the LED (ROM-message strapping). GPIO 2 button is fine. GPIO 13 was tried for the LED and rejected (it's the Arduino-ESP32 default SPI MISO; `SPI.begin()` claims it during display init, so the LED couldn't stay HIGH). GPIO 21 is the current pick — no strapping role, no default peripheral.
+- **Connection-refused vs asleep is indistinguishable** from the browser. Editor copy covers all three failure modes (asleep / off / wrong network) with one hint.
+- **No software-triggered sleep yet.** Long-press is the only path. Adding `POST /sleep` is a Phase 9-or-later concern; for now, button-only avoids one more way to misuse the API.
+
+### Hand-off
+- Code is in. Native tests pass.
+- User is wiring the hardware (button + LED + 330 Ω). Phase 8 completes when bench gates K1–K8 pass and implementation notes get appended below.
+- Phase 9 (screensaver cycling) can start as soon as K1–K3 are green — it adds a timer-wake path on top of this same plumbing.
+
 ---
 
 ## Phases tempted to combine — keep separate
