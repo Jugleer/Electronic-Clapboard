@@ -19,7 +19,7 @@
 | Part                            | Qty | Notes                                                                  |
 |---------------------------------|----:|------------------------------------------------------------------------|
 | 6 mm tactile push button        |   2 | Wake button (GPIO 2), fire button (GPIO 14). Through-hole, 4-leg or 2-leg both fit. Button-to-GND wiring; firmware enables internal pull-up. |
-| 3 mm or 5 mm LED                |   1 | Status indicator on GPIO 13. HIGH = awake. Any colour; green is conventional. |
+| 3 mm or 5 mm LED                |   1 | Status indicator on GPIO 21. HIGH = awake. Any colour; green is conventional. |
 | 330 Ω resistor                  |   1 | Status-LED current limiter (~5 mA at 3.3 V).                           |
 | 10 kΩ resistor                  |   2 | **Optional** external pull-up for the buttons, paired with the 100 nF cap below. Only fit if firmware debounce alone doesn't suppress your specific switch's bounce. |
 | 100 nF ceramic cap              |   2 | **Optional**, paired with the 10 kΩ resistors above for RC debounce.    |

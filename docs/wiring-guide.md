@@ -29,7 +29,7 @@ The phases below build up these assignments incrementally. This is the consolida
 | EPD PWR            |    6 | OUT       | Panel power gate (HAT rev2.3+). HIGH = on.                          |
 | Wake button        |    2 | IN_PULLUP | Button-to-GND, pressed = LOW. RTC-IO capable for `ext0` deep-sleep wake. |
 | Fire button        |   14 | IN_PULLUP | Button-to-GND, pressed = LOW. RTC-IO capable.                       |
-| Status LED         |   13 | OUT       | Through 330 Ω. HIGH = awake.                                        |
+| Status LED         |   21 | OUT       | Through 330 Ω. HIGH = awake. (GPIO 13 was tried first but is the Arduino-ESP32 default SPI MISO; `SPI.begin()` clobbered the OUTPUT mode during display init.) |
 | USB D−             |   19 | —         | Reserved for native USB OTG (fallback keyboard host).               |
 | USB D+             |   20 | —         | Reserved for native USB OTG.                                        |
 
@@ -403,9 +403,14 @@ Both buttons follow the same wiring idiom: **button to GND, internal pull-up ena
 | **2** | RTC-IO capable, free in the existing pin map, not a strapping pin. | Not GPIO 0/3/45/46 (strapping); not GPIO 1 (battery ADC); not GPIO 4-12 (display + MOSFETs); not GPIO 19/20 (USB OTG). |
 | **14** | RTC-IO capable so a future revision can wake on it; not a strapping pin; physically close to GPIO 2 on the DevKitC-1 header so a single button daughterboard or breadboard cluster covers both. | Same exclusions as above. |
 
-### Why GPIO 13 for the status LED
+### Why GPIO 21 for the status LED
 
-The status LED is HIGH when the device is awake, LOW during deep-sleep / pre-init. GPIO 3 was rejected because it samples ROM-message strapping at reset — an LED + resistor weakly pulls it LOW and silences the boot-time debug messages on UART. GPIO 13 has no boot-time role.
+The status LED is HIGH when the device is awake, LOW during deep-sleep / pre-init. Two prior picks were tried and rejected:
+
+- **GPIO 3** samples ROM-message strapping at reset — an LED + resistor weakly pulls it LOW and silences the boot-time debug messages on UART.
+- **GPIO 13** is the Arduino-ESP32 default SPI MISO. `SPI.begin()` (called with no args by GxEPD2 inside `display::begin()`) calls `spiAttachMISO(_, 13)`, which reconfigures the pin from OUTPUT back to SPI MISO input. Bench symptom: the LED came on briefly during `power::begin()`, then went dark for the rest of the awake session.
+
+GPIO 21 is not a strapping pin and isn't claimed by any default peripheral on the S3-DevKitC-1, so it stays HIGH as set.
 
 ### Components
 
@@ -432,7 +437,7 @@ The status LED is HIGH when the device is awake, LOW during deep-sleep / pre-ini
                           (optional debounce:
                            10 kΩ pull-up + 100 nF cap to GND)
                      │
-                  [GPIO 13]──── 330 Ω ──── LED anode (long leg)
+                  [GPIO 21]──── 330 Ω ──── LED anode (long leg)
                                               │
                                           LED cathode (short leg) ──── GND
 ```
@@ -450,7 +455,7 @@ Notes:
 ```cpp
 #define PIN_WAKE_BUTTON  2
 #define PIN_FIRE_BUTTON  14
-#define PIN_WAKE_LED     13
+#define PIN_WAKE_LED     21
 
 void setup() {
     pinMode(PIN_WAKE_BUTTON, INPUT_PULLUP);
@@ -515,6 +520,6 @@ Once all four phases work independently, integrate them:
 | Serial monitor shows resets | Brownout — 3.3V rail sagging during solenoid/LED fire | Separate ground return paths; add 100µF cap on ESP 3V3 pin |
 | Wake / fire button reads as pressed continuously | Wired without `INPUT_PULLUP` or with an external pull-down by mistake | The convention is button-to-GND with internal pull-up; `pinMode(PIN, INPUT_PULLUP)` then read LOW = pressed |
 | Wake / fire button registers multiple presses per physical click | Bounce on a cheap tactile switch | Firmware debounce in `power.cpp` / `fire.cpp` should suppress this; if not, add the optional 10 kΩ + 100 nF RC across the button |
-| Status LED stays dark with the device awake | LED in backwards or wrong-polarity wiring | Long leg = anode to GPIO 13 via 330 Ω; short leg = cathode to GND |
+| Status LED stays dark with the device awake | LED in backwards or wrong-polarity wiring | Long leg = anode to GPIO 21 via 330 Ω; short leg = cathode to GND |
 | Fire button does nothing | Battery below `LOW_BATTERY_THRESHOLD_MV`, or last fire was less than `MIN_FIRE_GAP_MS` ago, or fire state machine is in a refusing state | Check `GET /status` for `fire_ready: false` reason; charge the pack or wait the cooldown |
 | Pressing fire while a frame is rendering does nothing | Render blocks `loop()` so the fire poll can't sample | Acceptable — not a bug. Don't sync mid-render anyway. |
