@@ -165,6 +165,75 @@ static void test_all_locked_fields_present() {
     TEST_ASSERT_TRUE(contains(s, "\"last_frame_bytes\""));
     TEST_ASSERT_TRUE(contains(s, "\"last_frame_render_ms\""));
     TEST_ASSERT_TRUE(contains(s, "\"last_full_refresh\""));
+    TEST_ASSERT_TRUE(contains(s, "\"last_fire_at_ms\""));
+    TEST_ASSERT_TRUE(contains(s, "\"fires_since_boot\""));
+    TEST_ASSERT_TRUE(contains(s, "\"fire_ready\""));
+}
+
+// --- Phase 9 fire fields ---------------------------------------------------
+//
+// Same null-vs-value discipline as last_frame_*: before any fire has
+// been accepted, last_fire_at_ms is explicit JSON null (not 0); once a
+// fire lands, it carries the millis() value. fires_since_boot is a
+// bare integer; fire_ready is a bare bool. protocol.md §2.2 "Fire
+// fields" is the contract.
+
+static void test_last_fire_at_ms_null_when_never_fired() {
+    StatusInputs in = fresh_boot_inputs();
+    in.last_fire_at_ms = std::nullopt;
+    in.fires_since_boot = 0;
+    in.fire_ready = true;
+    const auto s = build_status_json(in);
+    TEST_ASSERT_TRUE_MESSAGE(contains(s, "\"last_fire_at_ms\":null"),
+                             "last_fire_at_ms must be null pre-first-fire");
+    TEST_ASSERT_FALSE_MESSAGE(contains(s, "\"last_fire_at_ms\":0"),
+                              "last_fire_at_ms must NOT be 0 pre-first-fire");
+}
+
+static void test_last_fire_at_ms_populated_after_fire() {
+    StatusInputs in = fresh_boot_inputs();
+    in.last_fire_at_ms = 7654;
+    in.fires_since_boot = 3;
+    in.fire_ready = true;
+    const auto s = build_status_json(in);
+    TEST_ASSERT_TRUE(contains(s, "\"last_fire_at_ms\":7654"));
+    TEST_ASSERT_FALSE(contains(s, "\"last_fire_at_ms\":null"));
+}
+
+static void test_fires_since_boot_is_bare_number() {
+    StatusInputs in = fresh_boot_inputs();
+    in.fires_since_boot = 0;
+    const auto a = build_status_json(in);
+    TEST_ASSERT_TRUE(contains(a, "\"fires_since_boot\":0"));
+
+    in.fires_since_boot = 42;
+    const auto b = build_status_json(in);
+    TEST_ASSERT_TRUE(contains(b, "\"fires_since_boot\":42"));
+    TEST_ASSERT_FALSE_MESSAGE(contains(b, "\"fires_since_boot\":\"42\""),
+                              "fires_since_boot must not be quoted");
+}
+
+static void test_fire_ready_serialises_as_bare_bool() {
+    StatusInputs in = fresh_boot_inputs();
+    in.fire_ready = true;
+    const auto t = build_status_json(in);
+    TEST_ASSERT_TRUE(contains(t, "\"fire_ready\":true"));
+
+    in.fire_ready = false;
+    const auto f = build_status_json(in);
+    TEST_ASSERT_TRUE(contains(f, "\"fire_ready\":false"));
+    TEST_ASSERT_FALSE_MESSAGE(contains(f, "\"fire_ready\":\"false\""),
+                              "fire_ready must not be quoted");
+}
+
+static void test_fire_fields_present_without_last_frame() {
+    // Fresh boot: never received a frame and never fired. Both null-
+    // discipline fields independently emit null without interfering.
+    const auto s = build_status_json(fresh_boot_inputs());
+    TEST_ASSERT_TRUE(contains(s, "\"last_frame_at\":null"));
+    TEST_ASSERT_TRUE(contains(s, "\"last_fire_at_ms\":null"));
+    TEST_ASSERT_TRUE(contains(s, "\"fires_since_boot\":0"));
+    TEST_ASSERT_TRUE(contains(s, "\"fire_ready\":true"));
 }
 
 int main(int, char**) {
@@ -184,5 +253,10 @@ int main(int, char**) {
     RUN_TEST(test_last_frame_populated_values);
     RUN_TEST(test_last_full_refresh_true_serialises_as_true);
     RUN_TEST(test_all_locked_fields_present);
+    RUN_TEST(test_last_fire_at_ms_null_when_never_fired);
+    RUN_TEST(test_last_fire_at_ms_populated_after_fire);
+    RUN_TEST(test_fires_since_boot_is_bare_number);
+    RUN_TEST(test_fire_ready_serialises_as_bare_bool);
+    RUN_TEST(test_fire_fields_present_without_last_frame);
     return UNITY_END();
 }

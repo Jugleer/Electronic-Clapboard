@@ -85,6 +85,23 @@ std::string build_status_json(const StatusInputs& in) {
         out += "null";
     }
 
+    // Phase 9 fire fields. last_fire_at_ms uses the same null-vs-value
+    // discipline as last_frame_*: explicit JSON null distinguishes
+    // "never fired this session" from "fired with this timestamp".
+    if (in.last_fire_at_ms.has_value()) {
+        append_key(out, "last_fire_at_ms", false);
+        append_uint(out, *in.last_fire_at_ms);
+    } else {
+        append_key(out, "last_fire_at_ms", false);
+        out += "null";
+    }
+
+    append_key(out, "fires_since_boot", false);
+    append_uint(out, in.fires_since_boot);
+
+    append_key(out, "fire_ready", false);
+    out += (in.fire_ready ? "true" : "false");
+
     out += '}';
     return out;
 }

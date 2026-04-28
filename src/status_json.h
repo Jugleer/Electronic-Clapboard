@@ -25,6 +25,15 @@ struct StatusInputs {
     uint32_t    free_heap;
     uint32_t    psram_free;
     std::optional<LastFrameMeta> last_frame;
+
+    // Phase 9 fire fields (protocol.md §2.2 "Fire fields").
+    // last_fire_at_ms: std::nullopt → JSON null (no fires this awake
+    //   session, mirroring the last_frame_* discipline).
+    // fires_since_boot: monotonic counter; rejected presses don't tick.
+    // fire_ready: false during cooldown OR low battery.
+    std::optional<uint32_t> last_fire_at_ms;
+    uint32_t                fires_since_boot = 0;
+    bool                    fire_ready       = true;
 };
 
 // Returns a single-line UTF-8 JSON object matching protocol.md §2.2.

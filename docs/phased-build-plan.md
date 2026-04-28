@@ -41,9 +41,12 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 4     | Editor primitives: text/rect/line, groups, snap, undo | ✅ done     | 2026-04-27 |
 | 5     | Icon library                                          | ✅ done     | 2026-04-27 |
 | 6     | Image upload with client-side dithering               | ✅ done     | 2026-04-27 |
-| 7     | Layout save/load (and `/sync` if hardware ready)      | ⏳ planned  | —          |
+| 7     | Layout save/load (IndexedDB; `/sync` deferred)        | ✅ done     | 2026-04-27 |
+| 8     | Sleep / wake architecture                             | ⏳ bench    | code 2026-04-27 |
+| 9     | Sync mechanism — physical fire button                 | ⏳ bench    | code 2026-04-28 |
+| 10    | Untethered screensaver cycling (timer-wake)           | 🔜 planned  | —          |
 
-**Firmware version:** `0.2.3` (Phase 6 made no firmware change).
+**Firmware version:** `0.4.0` (Phase 9 added fire fields + fire path).
 **Test totals:** 167 vitest cases across 14 files, 67 native Unity
 cases across 7 programs, both firmware envs build clean.
 **Bundle:** ~485 KB JS (152 KB gz) + 227 KB icon PNGs in
@@ -1478,7 +1481,72 @@ This phase is the prerequisite for Phase 9 (untethered screensaver cycling).
 ### Hand-off
 - Code is in. Native tests pass.
 - User is wiring the hardware (button + LED + 330 Ω). Phase 8 completes when bench gates K1–K8 pass and implementation notes get appended below.
-- Phase 9 (screensaver cycling) can start as soon as K1–K3 are green — it adds a timer-wake path on top of this same plumbing.
+- Phase 10 (screensaver cycling) can start as soon as K1–K3 are green — it adds a timer-wake path on top of this same plumbing. (Phase 9 is the sync mechanism, slotted in between because the wiring overlaps.)
+
+---
+
+## Phase 9 — Sync mechanism (physical fire button) ⏳ **code landed; hardware bench pending**
+
+**Slice delivered:** A dedicated fire button on the device drives the LED and solenoid for a synchronised flash + clap. Firmware debounces the button, enforces a 1.5 s minimum gap between fires, refuses if battery is below `LOW_BATTERY_THRESHOLD_MV`, and clamps every pulse via a hardware-timer ISR that forces both gates LOW after `SOLENOID_PULSE_MS` (≤ `SOLENOID_MAX_PULSE_MS`) regardless of main-loop state. The editor observes fire events through new `/status` fields — there is no software-trigger path. Awake-only by construction: `loop()` doesn't run while asleep, so the fire poll is dormant.
+
+This phase is the v1 sync mechanism. `POST /sync` is explicitly NOT a v1 endpoint — see [protocol.md §2.3](./protocol.md#23-sync-mechanism--physical-button-only-no-post-sync).
+
+### What lands
+- Fire button on **GPIO 14** (button-to-GND, internal pull-up; pressed = LOW). RTC-IO capable so a future revision could wake on it; not used as a wake source in v1.
+- `MIN_FIRE_GAP_MS = 1500` in [include/config.h](../include/config.h) — middle of the 1–2 s envelope, debounced + cooldown-gated.
+- `src/fire_state.h` — pure header-only state machine (Idle → Firing → CoolDown → Idle), linked into `[env:native]`. Mirrors the `lockin_state.h` / `power_state.h` pattern.
+- `src/fire.{h,cpp}` — Arduino-side glue: pin init, ADC sampling, `power_state::ButtonTracker` reused for debounce, `hw_timer_t` watchdog ISR that clears both gates via a single `GPIO.out_w1tc` register write (atomic, IRAM-safe).
+- `main_net.cpp` calls `fire::begin()` after `power::begin()` and runs `fire::service()` from `loop()` after `power::service()` so a long-press to sleep `[[noreturn]]`-aborts before the fire poll runs.
+- `/status` adds three fields (`last_fire_at_ms`, `fires_since_boot`, `fire_ready`) per [protocol.md §2.2](./protocol.md#22-get-status--health-and-last-frame-metadata).
+- Editor: [useDeviceStatus.ts](../web/src/useDeviceStatus.ts) parses the new fields; `App.tsx`'s `DeviceStatusBadge` renders an inline `FireReadyBadge` (ready / blocked) when `firmware_version >= 0.4.0`.
+- `firmware_version` bumped to `0.4.0`.
+- `protocol.md §2.3` rewritten as "physical button only" — explicit deliberate omission of `POST /sync` for v1, with rationale.
+- `protocol.md §2.5` extended with a "fire state across sleep/wake" subsection: cooldown, last-fire timestamp, and counter all reset on wake.
+
+### Acceptance tests
+- **Native** (landed): `test_fire_state` — 13 cases covering rising-edge, held-press idempotence, cooldown silently-ignores, post-cooldown accept, low-battery refuse, low-battery recovery, millis() rollover, reset-on-wake semantics, exact-boundary case.
+- **Native** (extended): `test_status_json` — 5 new cases for `last_fire_at_ms` null/populated, `fires_since_boot` bare integer, `fire_ready` true/false, all-fire-fields-present-when-no-frame.
+- **Editor** (landed): `useDeviceStatus.test.ts` — 6 cases covering Phase 9 body parse, pre-Phase-9 firmware (fields absent), null-vs-undefined distinction, garbage-tolerance, non-object inputs.
+- **Hardware (pending bench)**:
+  - **Gate F1 — pulse simultaneity.** Scope on `PIN_LED_GATE` and `PIN_SOLENOID_GATE` during a press. Confirm both rise within 10 µs of each other and both fall within 10 µs (the ISR clears both bits in one register write, so the fall edge should be near-perfect; the rise has two `digitalWrite()` calls in sequence and may show ~µs skew).
+  - **Gate F2 — pulse width within spec.** `SOLENOID_PULSE_MS` is 60 ms. Scope-measured pulse width must be 55–65 ms (ISR jitter only, no scheduling jitter).
+  - **Gate F3 — rate limit.** Press the fire button rapidly 10 times in 5 s. Confirm at most 4 fires (5000 / 1500 = 3.33 → 4 with the boundary). Rejected presses are silent.
+  - **Gate F4 — watchdog backstop.** Insert a 5-second `delay()` in a debug build immediately after `start_pulse()` (before the ISR re-arms anything). Confirm scope shows gates LOW within `SOLENOID_MAX_PULSE_MS` regardless of the main-loop hang. (The current implementation makes this impossible to violate — the ISR is the only path that clears the gates — but the test confirms it.)
+  - **Gate F5 — low-battery refuse.** Drain pack to ~3.4 V/cell (10.2 V total). Confirm `GET /status` returns `fire_ready: false`, presses do not fire, `fires_since_boot` does not advance. Charge back; presses resume.
+  - **Gate F6 — 100 consecutive fires.** Press the button at ~2 s cadence × 100. `fires_since_boot` ticks cleanly to 100. `last_fire_at_ms` matches the most recent press. No gate-stuck-high state at the end (verify with multimeter on cold settle).
+  - **Gate F7 — sleep clears state.** Long-press wake button to sleep; wake; press fire button. Press is accepted immediately (cooldown does not survive sleep). `fires_since_boot` reads 1 in /status, not 101.
+  - **Gate F8 — fire button is NOT a wake source.** While asleep, mash the fire button. Confirm device stays asleep (status LED dark, /status unreachable). Only the wake button brings it back up.
+
+### Risks (already considered)
+- **GPIO 14 vs strapping pins.** GPIO 14 is not a strapping pin on the ESP32-S3, doesn't drive any default peripheral, and is RTC-IO capable. Verified in the wiring guide and config.h notes.
+- **Battery sampling at the wrong moment.** v1 samples once per service tick (~50 Hz) and feeds the latest reading into the state machine. A press arriving on the same tick as a noisy ADC sample below threshold will be silently refused — acceptable: the threshold has 600 mV margin vs critical, so genuine ADC flutter is well below it. If observed in practice, add a 5-sample median filter.
+- **ISR + AsyncTCP interaction.** The hw_timer ISR runs from the timer peripheral interrupt context, not the AsyncTCP task. A wedged AsyncTCP queue cannot delay the gate clear. Verified by inspecting esp32-hal-timer.c: the ISR is registered via `esp_intr_alloc()` with default flags, runs above task priority.
+- **Gate rise simultaneity.** Two sequential `digitalWrite()` calls aren't perfectly atomic. If F1 shows >10 µs skew, tighten with `GPIO.out_w1ts = (1u << PIN_LED_GATE) | (1u << PIN_SOLENOID_GATE);` for the rise too. Holding off until F1 results.
+- **Editor heuristic for "cooling vs blocked".** Removed; v1 renders only ready vs blocked. Cooldown is 1500 ms; poll cadence is 8000 ms — by the time a poll observes `fire_ready=false`, the cooldown is virtually always over and the cause is battery. Tooltip explains both possibilities.
+- **No `POST /sync` endpoint.** Deliberate v1 omission, locked in protocol.md §2.3. Rationale: physical button = physical event; firmware-side rate limiting + battery refusal can't be paralleled by an HTTP single-flight without divergence; removes a class of misuse.
+
+### Hand-off
+- Code is in. Native tests pass on CI (host C++ compiler not available on Windows; CI runs Linux native tests).
+- Both firmware envs build clean: `[env:esp32s3-net]` 29.1% RAM / 12.5% Flash, `[env:esp32s3]` (typewriter canary) untouched and green.
+- Editor: 247 vitest cases pass; typecheck + 512 KB / 162 KB gz build under the 600 KB CI gate.
+- User is wiring the fire button (GPIO 14) and running F1–F8 on the bench.
+- Phase 10 (screensaver cycling) can start independently — the fire path doesn't share any timer or task with the planned screensaver tick.
+
+### Phase 9 implementation notes (read me before Phase 10+)
+
+Append on bench-gate completion. Anticipated bench observations:
+
+- Whether `digitalWrite()`-pair simultaneity (F1) is tight enough or whether the rise edge needs `GPIO.out_w1ts` for atomicity (parallels the fall path in the ISR).
+- Real-world `last_fire_at_ms` jitter under concurrent /frame load (the loop tick can be delayed by a multi-second synchronous render — fire poll won't sample during that window, which is documented as acceptable in §K8 for the wake button and applies here too).
+- ADC noise floor on this board for the 11-dB attenuation; confirms whether the v1 single-sample approach is robust enough.
+
+---
+
+## Phase 10 — Untethered screensaver cycling 🔜 **planned**
+
+**Slice (placeholder; flesh out at Phase 10 kickoff):** RTC timer wake on a configurable interval rotates through a saved set of layouts on the panel without external interaction. Builds on Phase 8 plumbing (timer-wake branch already present in `power::WakeReason::Timer` and `main_net.cpp`'s `if (wake_reason() != Timer)` boot-splash skip).
+
+Original Phase 9 in earlier drafts. Renumbered when the sync-button slice landed in this position.
 
 ---
 

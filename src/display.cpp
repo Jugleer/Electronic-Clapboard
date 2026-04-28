@@ -53,6 +53,13 @@ uint32_t draw_partial_content(const uint8_t* buf) {
     return millis() - t0;
 }
 
+void power_off() {
+    // Drop PIN_EPD_PWR LOW to remove power from the driver-board ICs.
+    // Image is retained by the e-paper film itself; only the support
+    // electronics lose power. ~5 mA on 3.3 V saved while sleeping.
+    digitalWrite(PIN_EPD_PWR, LOW);
+}
+
 uint32_t draw_full_white() {
     const uint32_t t0 = millis();
     epd.setFullWindow();

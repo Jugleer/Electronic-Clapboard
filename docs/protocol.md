@@ -156,26 +156,72 @@ Slugs lock in: `bad_size`, `too_large`, `bad_content_type`, `busy`,
 ```json
 {
   "ok": true,
-  "firmware_version": "0.1.0",
+  "firmware_version": "0.4.0",
   "uptime_ms": 123456,
   "free_heap": 213456,
   "psram_free": 8000000,
   "last_frame_at": 122000,
   "last_frame_bytes": 48000,
   "last_frame_render_ms": 1432,
-  "last_full_refresh": false
+  "last_full_refresh": false,
+  "last_fire_at_ms": null,
+  "fires_since_boot": 0,
+  "fire_ready": true
 }
 ```
 
 Before any frame has been received, the `last_frame_*` fields are `null`
-(JSON null, not `0`).
+(JSON null, not `0`). Likewise `last_fire_at_ms` is `null` until the first
+fire event has been accepted since boot.
 
-### 2.3 `POST /sync` — fire LED + solenoid (Phase 7+)
+#### Fire fields (Phase 9+)
+| Field              | Type             | Meaning                                                                 |
+| ------------------ | ---------------- | ----------------------------------------------------------------------- |
+| `last_fire_at_ms`  | number \| null   | `millis()` value at the most recent accepted fire; `null` if none       |
+| `fires_since_boot` | number           | Monotonic counter of accepted fires this awake session (resets on wake) |
+| `fire_ready`       | boolean          | `false` during cooldown OR when battery is below `LOW_BATTERY_THRESHOLD_MV` |
 
-Reserved. Body is empty. Response is JSON `{ "ok": true, "fired_at_ms": ... }`.
-Returns `503` if battery is below `LOW_BATTERY_THRESHOLD_MV` from
-[include/config.h](../include/config.h). Pulse durations are firmware-enforced
-and not configurable over the wire in v1.
+Rejected presses (debounce, cooldown, low battery) **do not** advance
+`fires_since_boot` and **do not** update `last_fire_at_ms`. There is no
+distinguishing flag for "blocked because cooldown" vs "blocked because
+low battery" in v1 — clients infer "low battery" from `fire_ready=false`
+plus a sustained inability to fire. If we need a precise reason later,
+we'll add `fire_block_reason` without removing existing fields (see §5).
+
+Per §5, clients written for `firmware_version < "0.4.0"` will not see
+these fields at all and should treat their absence as "fire telemetry
+unavailable" — render no fire badge.
+
+### 2.3 Sync mechanism — physical button only (no `POST /sync`)
+
+The fire mechanism (LED + solenoid pulse) is driven by a **physical
+button on the device** (`PIN_FIRE_BUTTON` in
+[include/config.h](../include/config.h)). There is no
+`POST /sync` endpoint in v1, and clients **must not** assume one will
+appear. Clients observe fire events via `/status` (§2.2):
+`last_fire_at_ms`, `fires_since_boot`, `fire_ready`.
+
+Rationale for button-only:
+
+- The captured moment is a physical event in the room — visual flash +
+  audible solenoid strike — and the timestamp logged in `last_fire_at_ms`
+  must correspond to the operator's button press, not to a network
+  round-trip with variable jitter.
+- Debounce (firmware `power_state::BUTTON_DEBOUNCE_MS`), inter-fire
+  cooldown (`MIN_FIRE_GAP_MS`), and battery refusal are enforced in the
+  firmware state machine. An HTTP path would add a parallel single-flight
+  surface to keep coherent with the local one — deliberately avoided.
+- Removes a class of misuse: a hostile or buggy client cannot drain the
+  battery / wear the solenoid by spamming a remote endpoint.
+
+Pulse durations (`LED_PULSE_MS`, `SOLENOID_PULSE_MS`,
+`SOLENOID_MAX_PULSE_MS` watchdog cap) are firmware-enforced and not
+configurable over the wire in v1.
+
+If a future use case wants software-triggered fires (e.g. coordinating
+multiple slates from a single browser), it ships as `POST /sync` then,
+with the same battery + cooldown + watchdog gates around the local
+state machine. Not a v1 concern.
 
 ### 2.4 TCP log stream on port 23 (informational, dev/diagnostic only)
 
@@ -208,6 +254,59 @@ Behaviour:
 
 This endpoint is not versioned and may change without bumping the
 protocol version. Clients must not depend on its presence or format.
+
+### 2.5 Sleep / wake (Phase 8, informational)
+
+Not part of the wire contract — this section documents what clients
+*observe* when the device is asleep, and how to recover.
+
+The firmware can enter deep-sleep via a long-press (>= 1 s) of the wake
+button on the device (see `PIN_WAKE_BUTTON` in
+[include/config.h](../include/config.h)). While asleep:
+
+- Wi-Fi is off; the IP address is not held.
+- The HTTP server is not running. `POST /frame`, `GET /status`, and
+  `nc :23` will all fail at the TCP layer (connection refused, no
+  route to host, or eventual timeout depending on the network path).
+- The e-paper panel retains the last image — the panel film is bistable
+  and the driver-board logic rail is power-gated, but the visible image
+  stays put indefinitely.
+- A single press of the wake button (LOW edge on `PIN_WAKE_BUTTON`)
+  wakes the device. After ~5–8 s of boot + Wi-Fi association, the boot
+  splash overwrites the retained image and `/status` is reachable
+  again.
+
+**Client guidance.** A connection refused or timeout on `/frame` or
+`/status` is *indistinguishable* from "device on a different network"
+or "device unplugged" purely from the TCP response. The editor's
+fallback copy ("is the device awake? press the wake button") covers
+all three cases without needing a probe.
+
+The boot splash *is* a reliable indicator of recent wake — its
+on-screen IP address is the post-wake DHCP lease, which a client can
+sanity-check against its host config.
+
+#### Fire state across sleep / wake
+
+The fire state machine is in-memory only and resets on every wake. In
+particular:
+
+- `fires_since_boot` resets to `0` on wake (every wake is a cold boot
+  from the firmware's POV — RAM is gone).
+- `last_fire_at_ms` resets to `null`. The next accepted press will
+  populate it with a fresh `millis()` value relative to the new
+  awake-session uptime.
+- The cooldown gate (`MIN_FIRE_GAP_MS`) does not survive sleep. The
+  first press after wake is accepted immediately even if the prior
+  fire (in the previous awake session) was very recent — by the time
+  the operator has long-pressed to sleep, woken the device, and
+  pressed again, far more than `MIN_FIRE_GAP_MS` has elapsed in
+  wall-clock terms anyway.
+
+The fire button is **not** a wake source in v1. While the device is
+asleep, presses on `PIN_FIRE_BUTTON` are ignored (it isn't routed
+through ext0). Use the wake button (`PIN_WAKE_BUTTON`) to bring the
+device back up; only then does the fire path arm.
 
 ---
 

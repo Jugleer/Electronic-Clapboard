@@ -14,6 +14,14 @@ namespace display {
 // Safe to call from setup() after MOSFET gates are LOW. Slow (~1 s).
 void begin();
 
+// Drop the EPD logic-rail enable (PIN_EPD_PWR LOW). The bistable display
+// retains whatever was last drawn — the panel goes dark on the e-paper
+// driver-board ICs but the visible image stays put. Used by power::
+// enter_sleep() to bring idle current toward the buck quiescent floor.
+// After this call the panel is unsafe to drive until display::begin()
+// re-runs (which re-powers and re-inits the driver).
+void power_off();
+
 // Render a "boot" splash showing firmware version + IP + a hint line.
 // Called once after net::begin() completes so the panel reflects what
 // was just flashed without waiting for the first /frame request.

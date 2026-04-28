@@ -34,6 +34,13 @@ PWR:    GPIO 6   # HAT rev2.3+ panel power enable (HIGH = on, LOW = off; image r
 LED_GATE:      GPIO 4   # → 220Ω → IRLZ44N gate (LED driver)
 SOLENOID_GATE: GPIO 5   # → 220Ω → IRLZ44N gate (solenoid driver)
 
+# Buttons (Phase 8 + 9)
+WAKE_BUTTON:   GPIO 2   # button-to-GND, internal pull-up, RTC-IO ext0 wake
+FIRE_BUTTON:   GPIO 14  # button-to-GND, internal pull-up, awake-only
+
+# Status LED (Phase 8)
+WAKE_LED:      GPIO 21  # HIGH = awake
+
 # Battery ADC
 VBATT_ADC:     GPIO 1   # via voltage divider (10k/3.3k)
 

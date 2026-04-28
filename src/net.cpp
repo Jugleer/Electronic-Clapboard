@@ -6,6 +6,7 @@
 #include <ESPAsyncWebServer.h>
 
 #include "clap_log.h"
+#include "fire.h"
 #include "frame.h"
 #include "secrets.h"
 #include "status_json.h"
@@ -51,6 +52,9 @@ void handle_status(AsyncWebServerRequest* request) {
     in.free_heap        = ESP.getFreeHeap();
     in.psram_free       = ESP.getFreePsram();
     in.last_frame       = frame::last_meta();
+    in.last_fire_at_ms  = fire::last_fire_at_ms();
+    in.fires_since_boot = fire::fires_since_boot();
+    in.fire_ready       = fire::is_fire_ready();
 
     const std::string body = build_status_json(in);
 
