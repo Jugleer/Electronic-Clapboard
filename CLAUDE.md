@@ -92,6 +92,10 @@ USB_D+:  GPIO 20
 - Branch per feature, merge to `main`
 - Never commit secrets, WiFi credentials, or API keys
 
+### Commit cadence
+- After any logical unit of work (passing tests + clean diff scoped to one concern), invoke /commit before starting the next task.
+- Don't batch unrelated changes across multiple concerns into one commit cycle.
+
 ## Repository structure (current, post-Phase 5)
 
 The repo evolved from "single-firmware ESP32 project" into "ESP32
