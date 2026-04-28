@@ -11,11 +11,37 @@
 - Keep high-current paths (LED, solenoid) on one side of the breadboard and signal-level wiring (SPI to e-paper, ADC) on the other. This isn't just tidiness — ground bounce from the solenoid can glitch the SPI bus.
 - IRLZ44N pinout (facing the label, legs down): **Gate — Drain — Source**. Double-check this with your specific part's datasheet; some TO-220 FETs swap drain and source.
 
+## Pin map (cumulative, post-Phase-4)
+
+The phases below build up these assignments incrementally. This is the consolidated view — keep it in sync with `include/config.h`.
+
+| Function           | GPIO | Direction | Notes                                                              |
+|--------------------|-----:|-----------|--------------------------------------------------------------------|
+| LED MOSFET gate    |    4 | OUT       | 220 Ω series + 100 kΩ pulldown to GND. LOW at boot.                |
+| Solenoid MOSFET gate | 5  | OUT       | Same idiom. Hardware-watchdog-enforced LOW after `SOLENOID_MAX_PULSE_MS`. |
+| Battery ADC        |    1 | IN (ADC)  | Through 10 kΩ / 3.3 kΩ divider; scales 12 V down to ~3 V.           |
+| EPD MOSI           |   11 | OUT       | SPI to Waveshare HAT.                                               |
+| EPD CLK            |   12 | OUT       | SPI to Waveshare HAT.                                               |
+| EPD CS             |   10 | OUT       | SPI chip select.                                                    |
+| EPD DC             |    9 | OUT       | Data/command. 4-line SPI mode.                                      |
+| EPD RST            |    8 | OUT       | Panel reset.                                                        |
+| EPD BUSY           |    7 | IN        | Refresh-in-progress signal.                                         |
+| EPD PWR            |    6 | OUT       | Panel power gate (HAT rev2.3+). HIGH = on.                          |
+| Wake button        |    2 | IN_PULLUP | Button-to-GND, pressed = LOW. RTC-IO capable for `ext0` deep-sleep wake. |
+| Fire button        |   14 | IN_PULLUP | Button-to-GND, pressed = LOW. RTC-IO capable.                       |
+| Status LED         |   13 | OUT       | Through 330 Ω. HIGH = awake.                                        |
+| USB D−             |   19 | —         | Reserved for native USB OTG (fallback keyboard host).               |
+| USB D+             |   20 | —         | Reserved for native USB OTG.                                        |
+
+Strapping pins (avoid loading at boot): GPIO 0, 3, 45, 46. None are used here.
+
 ## Safety checklist before applying power
 
 - [ ] MOSFET gates have 100kΩ pulldown resistors to GND (gate → 100kΩ → GND)
 - [ ] MOSFET gates are NOT connected directly to ESP GPIOs yet (we test the FET circuit standalone first)
 - [ ] Flyback diode is installed across the solenoid coil BEFORE first power-on (cathode band toward +12V)
+- [ ] Wake + fire buttons go to GND only — they do NOT touch the +12 V rail or any MOSFET drain
+- [ ] Status LED is wired through its 330 Ω current limiter (no LED-direct-to-GPIO)
 - [ ] PSU current limit is set to 3A max
 - [ ] No bare wire ends touching each other or the bench
 - [ ] Multimeter check: confirm no continuity between +12V rail and GND rail before powering on
@@ -357,14 +383,121 @@ The e-paper is the only SPI device in this design, so bus contention isn't an is
 
 ---
 
-## Phase 4: Integration
+## Phase 4: Buttons + status LED
 
-Once all three phases work independently, integrate them:
+**Goal:** Wire the two operator-facing buttons (wake, fire) and the device-state status LED, on a different patch of breadboard from the high-current LED + solenoid side. These are pure 3.3 V signals — no MOSFETs needed.
 
-1. Merge the test sketches into the real `src/main.cpp` with the state machine
-2. Add keyboard input (start with Serial input as a stand-in — type commands over the serial monitor)
-3. Add battery voltage monitoring (use the PSU voltage through the divider — it'll read ~12V, which is in the 3S range)
-4. Test the full sync sequence: type a label → press Enter → display updates → LED flashes + solenoid strikes → timestamp logged to Serial
+### Why two buttons
+
+| Button | GPIO | Behaviour |
+|--------|-----:|-----------|
+| **Wake** | GPIO 2 | Single press wakes the device from deep-sleep. Long-press (>= 1 s) while awake puts it back to sleep. RTC-IO capable for `ext0` deep-sleep wake. |
+| **Fire** | GPIO 14 | Press fires the LED + solenoid simultaneously (the visual + audio sync pair cameras pick up). Firmware enforces a minimum gap of ~1.5 s between fires and refuses if battery is below `LOW_BATTERY_THRESHOLD_MV`. RTC-IO capable so a future firmware revision can also use it as a wake source. |
+
+Both buttons follow the same wiring idiom: **button to GND, internal pull-up enabled in firmware, pressed = LOW.** No external pull-up resistor needed; the ESP's internal ~45 kΩ pull-up does the job. An optional 10 kΩ + 100 nF RC across the button can be added if firmware debounce alone isn't suppressing the bounce on your specific switch.
+
+### Why GPIO 2 and GPIO 14 specifically
+
+| GPIO | Why this one | Why not others |
+|-----:|--------------|----------------|
+| **2** | RTC-IO capable, free in the existing pin map, not a strapping pin. | Not GPIO 0/3/45/46 (strapping); not GPIO 1 (battery ADC); not GPIO 4-12 (display + MOSFETs); not GPIO 19/20 (USB OTG). |
+| **14** | RTC-IO capable so a future revision can wake on it; not a strapping pin; physically close to GPIO 2 on the DevKitC-1 header so a single button daughterboard or breadboard cluster covers both. | Same exclusions as above. |
+
+### Why GPIO 13 for the status LED
+
+The status LED is HIGH when the device is awake, LOW during deep-sleep / pre-init. GPIO 3 was rejected because it samples ROM-message strapping at reset — an LED + resistor weakly pulls it LOW and silences the boot-time debug messages on UART. GPIO 13 has no boot-time role.
+
+### Components
+
+| Part | Notes |
+|------|-------|
+| 6 mm tactile push button × 2 | One wake, one fire. Through-hole, 4-leg or 2-leg variants both fit. |
+| 3 mm or 5 mm LED | Status indicator. Any colour; green is conventional for "awake". |
+| 330 Ω resistor | LED current limiter. ~5 mA at 3.3 V, well within the GPIO drive limit. |
+| 10 kΩ resistor × 2 | **Optional**, only if external debounce is needed. |
+| 100 nF ceramic cap × 2 | **Optional**, paired with the 10 kΩ for RC debounce. |
+
+### Wiring
+
+```
+                  ESP32-S3
+                     │
+                  [GPIO 2]──────┬──── tactile button A ──── GND   (wake)
+                                │
+                          (optional debounce:
+                           10 kΩ pull-up + 100 nF cap to GND)
+                     │
+                  [GPIO 14]─────┬──── tactile button B ──── GND   (fire)
+                                │
+                          (optional debounce:
+                           10 kΩ pull-up + 100 nF cap to GND)
+                     │
+                  [GPIO 13]──── 330 Ω ──── LED anode (long leg)
+                                              │
+                                          LED cathode (short leg) ──── GND
+```
+
+Notes:
+- Keep these signals on the **3.3 V / signal side** of the breadboard, away from the 12 V solenoid + LED-driver patch. Button-to-GND lines are low-current but are part of the same wiring fabric — keeping them physically separated from the solenoid return path avoids the same ground-bounce risk that bites the SPI bus.
+- If you wire both buttons close together physically, label them clearly. Pressing the wake button when you mean the fire button is harmless (might put the device to sleep mid-take); pressing the fire button when you mean wake fires the solenoid for nothing and burns 30–80 ms of battery.
+
+### Test procedure
+
+1. Power off everything.
+2. Wire as above. Confirm with a multimeter that there's no continuity between any GPIO pin and GND with both buttons released, and brief continuity (~0 Ω) when each button is pressed.
+3. Power on. Upload a minimal test sketch:
+
+```cpp
+#define PIN_WAKE_BUTTON  2
+#define PIN_FIRE_BUTTON  14
+#define PIN_WAKE_LED     13
+
+void setup() {
+    pinMode(PIN_WAKE_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_FIRE_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_WAKE_LED, OUTPUT);
+    digitalWrite(PIN_WAKE_LED, HIGH);  // Awake = LED on
+    Serial.begin(115200);
+}
+
+void loop() {
+    bool wake = digitalRead(PIN_WAKE_BUTTON) == LOW;
+    bool fire = digitalRead(PIN_FIRE_BUTTON) == LOW;
+    if (wake) Serial.println("WAKE pressed");
+    if (fire) Serial.println("FIRE pressed");
+    delay(50);
+}
+```
+
+4. Press each button. The serial monitor should print the corresponding line at ~20 Hz while held.
+5. Release. The line should stop printing within one loop iteration.
+6. The LED should be on solidly throughout (no flicker).
+
+### What success looks like
+
+- Each button press lights up the serial output with no false negatives (held button always reads LOW).
+- No spurious presses when the other button is pressed (no cross-coupling through ground).
+- Status LED is on continuously while powered (no flicker, no dim state).
+
+### Wiring this into the real firmware
+
+The Phase 8 firmware (`src/power.cpp`) implements the wake button's debounced press detection and long-press-to-sleep. The fire button follows the same pattern (`src/fire.{cpp,h}` + a pure `src/fire_state.h` state machine; both linked into `[env:native]` for unit testing). The Arduino-side glue is:
+
+- Initialise both buttons with `INPUT_PULLUP` at the very top of `setup()`, alongside the MOSFET-LOW-first invariant.
+- Poll both from `loop()` at no slower than 50 Hz so debounce + long-press detection are responsive.
+- The fire state machine refuses presses during cooldown (1.5 s default, `MIN_FIRE_GAP_MS` in `include/config.h`) and when battery is below `LOW_BATTERY_THRESHOLD_MV`.
+
+---
+
+## Phase 5: Integration
+
+Once all four phases work independently, integrate them:
+
+1. Merge the test sketches into the real `src/main_net.cpp` with the network firmware
+2. Confirm the wake button puts the device to sleep on long-press and wakes it on single-press
+3. Confirm the fire button fires LED + solenoid simultaneously, with the 1.5 s minimum gap enforced and battery-low refusal
+4. Add battery voltage monitoring (use the PSU voltage through the divider — it'll read ~12V, which is in the 3S range)
+5. Test the full sync sequence: edit a slate in the browser → Send → display updates → press fire button → LED flashes + solenoid strikes → timestamp logged to Serial and visible in `GET /status`
 
 ---
 
@@ -380,3 +513,8 @@ Once all three phases work independently, integrate them:
 | Solenoid clicks weakly | Insufficient current — breadboard contact resistance | Bypass breadboard: solder the solenoid power wires directly to the PSU leads for testing |
 | MOSFET gets hot | Not fully enhanced (Vgs too low) or continuous conduction | Verify gate sees 3.3V; verify pulse code turns off; check for code hang |
 | Serial monitor shows resets | Brownout — 3.3V rail sagging during solenoid/LED fire | Separate ground return paths; add 100µF cap on ESP 3V3 pin |
+| Wake / fire button reads as pressed continuously | Wired without `INPUT_PULLUP` or with an external pull-down by mistake | The convention is button-to-GND with internal pull-up; `pinMode(PIN, INPUT_PULLUP)` then read LOW = pressed |
+| Wake / fire button registers multiple presses per physical click | Bounce on a cheap tactile switch | Firmware debounce in `power.cpp` / `fire.cpp` should suppress this; if not, add the optional 10 kΩ + 100 nF RC across the button |
+| Status LED stays dark with the device awake | LED in backwards or wrong-polarity wiring | Long leg = anode to GPIO 13 via 330 Ω; short leg = cathode to GND |
+| Fire button does nothing | Battery below `LOW_BATTERY_THRESHOLD_MV`, or last fire was less than `MIN_FIRE_GAP_MS` ago, or fire state machine is in a refusing state | Check `GET /status` for `fire_ready: false` reason; charge the pack or wait the cooldown |
+| Pressing fire while a frame is rendering does nothing | Render blocks `loop()` so the fire poll can't sample | Acceptable — not a bug. Don't sync mid-render anyway. |
