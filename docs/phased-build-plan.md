@@ -42,8 +42,8 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 5     | Icon library                                          | ✅ done     | 2026-04-27 |
 | 6     | Image upload with client-side dithering               | ✅ done     | 2026-04-27 |
 | 7     | Layout save/load (IndexedDB; `/sync` deferred)        | ✅ done     | 2026-04-27 |
-| 8     | Sleep / wake architecture                             | ⏳ bench    | code 2026-04-27 |
-| 9     | Sync mechanism — physical fire button                 | ⏳ bench    | code 2026-04-28 |
+| 8     | Sleep / wake architecture                             | ✅ done     | 2026-04-28 |
+| 9     | Sync mechanism — physical fire button                 | ✅ done     | 2026-04-28 |
 | 10    | Untethered screensaver cycling (timer-wake)           | 🔜 planned  | —          |
 
 **Firmware version:** `0.4.0` (Phase 9 added fire fields + fire path).
@@ -1143,7 +1143,7 @@ stays 0.2.3).
 
 ---
 
-## Phase 6 — Image upload with client-side dithering
+## Phase 6 — Image upload with client-side dithering ✅ **landed 2026-04-27**
 
 **Slice delivered:** Drag a PNG or JPG onto the canvas, it appears as an image element, gets dithered to 1-bit (Floyd-Steinberg by default, threshold as alternative), placed/resized like other elements.
 
@@ -1300,7 +1300,7 @@ Firmware was untouched (`firmware_version` stays 0.2.3).
 
 ---
 
-## Phase 7 — Layout save/load (and `/sync` if hardware ready)
+## Phase 7 — Layout save/load (and `/sync` if hardware ready) ✅ **landed 2026-04-27**
 
 **Slice delivered:** Save the current canvas state to a named layout, load it back, list saved layouts, delete, rename. Storage is browser-side (IndexedDB). Optionally: `/sync` endpoint on firmware fires LED + solenoid.
 
@@ -1443,7 +1443,7 @@ Firmware was untouched.
 
 ---
 
-## Phase 8 — Sleep / wake architecture ⏳ **code landed; hardware bench pending**
+## Phase 8 — Sleep / wake architecture ✅ **landed 2026-04-28**
 
 **Slice delivered:** A wake button puts the device into deep-sleep on a long-press; pressing the button wakes it again. While asleep, the EPD logic rail is power-gated (image retained), MOSFET gates are LOW, Wi-Fi is off, current draw drops toward the buck quiescent floor. While awake, a status LED is lit. Nothing else changes — the existing `/frame`, `/status`, editor flow all work identically once awake.
 
@@ -1462,15 +1462,15 @@ This phase is the prerequisite for Phase 9 (untethered screensaver cycling).
 
 ### Acceptance tests
 - **Native** (landed): `test_power_state` — 11 cases covering debounce promotion, long-press one-shot, re-arm after release, glitchy mid-hold tolerance, millis() rollover.
-- **Hardware (pending bench)**:
-  - **Gate K1 — wake from cold boot.** Power on, status LED comes on, splash paints with firmware 0.3.0, `/status` reachable.
-  - **Gate K2 — long-press to sleep.** Hold button ~1 s while awake. LED blinks 3× then goes dark. EPD goes blank in driver-board terms but the splash *remains visible* (bistable retention). `ping clapboard.local` fails.
-  - **Gate K3 — wake from sleep.** Single press of button. LED on within ~100 ms. ~5–8 s later splash repaints with the new IP, `/status` reachable. Wake reason in serial / TCP log says `button`.
-  - **Gate K4 — current draw asleep.** Multimeter on the 3S pack: expect ~0.3 mA with a low-Iq buck (the user is sourcing one), or ~3 mA with a typical hobby buck. Either way: at least an order of magnitude below awake draw.
-  - **Gate K5 — current draw awake.** Multimeter on the 3S pack idle (no `/frame` traffic): expect ~16 mA (~25 mA on 3.3 V via the buck, plus ~5 mA LED, plus buck quiescent).
-  - **Gate K6 — MOSFET gates verified LOW across sleep.** Scope on `PIN_LED_GATE` and `PIN_SOLENOID_GATE` during the LED-blink-into-sleep transition. Both must stay LOW.
-  - **Gate K7 — `/frame` works post-wake.** After wake, send a frame from the editor; renders normally. No regression vs. pre-Phase-8 behaviour.
-  - **Gate K8 — long-press during render.** Send a `?full=1` frame, mid-render hold the button. Sleep should fire after the render completes (the loop is blocked during the synchronous render, so service() can't sample). Acceptable — user shouldn't sleep mid-take anyway.
+- **Hardware (passed 2026-04-28)**:
+  - **Gate K1 — wake from cold boot.** ✅ Power on, status LED comes on, splash paints with firmware 0.3.0, `/status` reachable.
+  - **Gate K2 — long-press to sleep.** ✅ Hold button ~1 s while awake. LED blinks 3× then goes dark. EPD goes blank in driver-board terms but the splash *remains visible* (bistable retention). `ping clapboard.local` fails.
+  - **Gate K3 — wake from sleep.** ✅ Single press of button. LED on within ~100 ms. ~5–8 s later splash repaints with the new IP, `/status` reachable. Wake reason in serial / TCP log says `button`.
+  - **Gate K4 — current draw asleep.** ✅ Multimeter on the 3S pack: expect ~0.3 mA with a low-Iq buck (the user is sourcing one), or ~3 mA with a typical hobby buck. Either way: at least an order of magnitude below awake draw.
+  - **Gate K5 — current draw awake.** ✅ Multimeter on the 3S pack idle (no `/frame` traffic): expect ~16 mA (~25 mA on 3.3 V via the buck, plus ~5 mA LED, plus buck quiescent).
+  - **Gate K6 — MOSFET gates verified LOW across sleep.** ✅ Scope on `PIN_LED_GATE` and `PIN_SOLENOID_GATE` during the LED-blink-into-sleep transition. Both must stay LOW.
+  - **Gate K7 — `/frame` works post-wake.** ✅ After wake, send a frame from the editor; renders normally. No regression vs. pre-Phase-8 behaviour.
+  - **Gate K8 — long-press during render.** ✅ Send a `?full=1` frame, mid-render hold the button. Sleep should fire after the render completes (the loop is blocked during the synchronous render, so service() can't sample). Acceptable — user shouldn't sleep mid-take anyway.
 
 ### Risks (already considered)
 - **Holding button at boot.** If the user holds the button across power-on, the wake itself is hardware-driven; once awake, after ~1 s of held button the device sleeps again. Net: holding from boot for >1 s puts the device back to sleep. Documented behaviour, not a bug.
@@ -1479,13 +1479,20 @@ This phase is the prerequisite for Phase 9 (untethered screensaver cycling).
 - **No software-triggered sleep yet.** Long-press is the only path. Adding `POST /sleep` is a Phase 9-or-later concern; for now, button-only avoids one more way to misuse the API.
 
 ### Hand-off
-- Code is in. Native tests pass.
-- User is wiring the hardware (button + LED + 330 Ω). Phase 8 completes when bench gates K1–K8 pass and implementation notes get appended below.
-- Phase 10 (screensaver cycling) can start as soon as K1–K3 are green — it adds a timer-wake path on top of this same plumbing. (Phase 9 is the sync mechanism, slotted in between because the wiring overlaps.)
+- Code is in. Native tests pass. Bench gates K1–K8 all green on 2026-04-28.
+- Phase 10 (screensaver cycling) can start whenever — it adds a timer-wake path on top of this same plumbing. (Phase 9, the sync mechanism, slotted in between because the wiring overlaps.)
+
+### Phase 8 implementation notes (read me before Phase 9+)
+
+Append on bench-gate completion. Two notable mid-phase course-corrections:
+
+1. **GPIO 13 was the wrong pin for the status LED.** Initial pick was GPIO 13. Bench symptom: the LED turned on briefly during `power::begin()` then went dark for the rest of the awake session. Root cause: `pins_arduino.h` for the S3 sets `static const uint8_t MISO = 13`, and `SPI.begin()` (called with no args by GxEPD2 inside `display::begin()`) calls `spiAttachMISO(_, 13)`, which reconfigures the pin from OUTPUT to SPI MISO input. The OUTPUT-driven HIGH state was silently overridden. Moved to GPIO 21 (no peripheral default, no strapping role); LED stayed solid HIGH from then on. Implication for future pin picks: cross-check `pins_arduino.h` for the variant before picking any GPIO purely on "not a strapping pin" reasoning — peripheral defaults are the silent killer.
+
+2. **`esp_deep_sleep_start()` order.** ext0 wakeup must be enabled BEFORE `rtc_gpio_pullup_en()` because enabling ext0 is what flips the pin into RTC-IO mode; the pull-up call is a no-op until then. Initial code had them reversed and the pin floated during sleep, causing immediate wake on the first noise pulse. Documented in [src/power.cpp](../src/power.cpp) at the call site.
 
 ---
 
-## Phase 9 — Sync mechanism (physical fire button) ⏳ **code landed; hardware bench pending**
+## Phase 9 — Sync mechanism (physical fire button) ✅ **landed 2026-04-28**
 
 **Slice delivered:** A dedicated fire button on the device drives the LED and solenoid for a synchronised flash + clap. Firmware debounces the button, enforces a 1.5 s minimum gap between fires, refuses if battery is below `LOW_BATTERY_THRESHOLD_MV`, and clamps every pulse via a hardware-timer ISR that forces both gates LOW after `SOLENOID_PULSE_MS` (≤ `SOLENOID_MAX_PULSE_MS`) regardless of main-loop state. The editor observes fire events through new `/status` fields — there is no software-trigger path. Awake-only by construction: `loop()` doesn't run while asleep, so the fire poll is dormant.
 
@@ -1529,16 +1536,29 @@ This phase is the v1 sync mechanism. `POST /sync` is explicitly NOT a v1 endpoin
 - Code is in. Native tests pass on CI (host C++ compiler not available on Windows; CI runs Linux native tests).
 - Both firmware envs build clean: `[env:esp32s3-net]` 29.1% RAM / 12.5% Flash, `[env:esp32s3]` (typewriter canary) untouched and green.
 - Editor: 247 vitest cases pass; typecheck + 512 KB / 162 KB gz build under the 600 KB CI gate.
-- User is wiring the fire button (GPIO 14) and running F1–F8 on the bench.
+- Bench gates F1, F2, F3, F5, F8 verified green on hardware 2026-04-28; F4, F6, F7 deferred (architectural / endurance / sleep-state checks the user trusts without hands-on confirmation).
 - Phase 10 (screensaver cycling) can start independently — the fire path doesn't share any timer or task with the planned screensaver tick.
 
 ### Phase 9 implementation notes (read me before Phase 10+)
 
-Append on bench-gate completion. Anticipated bench observations:
+Bench results from 2026-04-28 + the architectural decisions worth remembering for Phase 10+:
 
-- Whether `digitalWrite()`-pair simultaneity (F1) is tight enough or whether the rise edge needs `GPIO.out_w1ts` for atomicity (parallels the fall path in the ISR).
-- Real-world `last_fire_at_ms` jitter under concurrent /frame load (the loop tick can be delayed by a multi-second synchronous render — fire poll won't sample during that window, which is documented as acceptable in §K8 for the wake button and applies here too).
-- ADC noise floor on this board for the 11-dB attenuation; confirms whether the v1 single-sample approach is robust enough.
+1. **Pulse simultaneity is comfortable with sequential `digitalWrite()`s.** F1 measured a consistent **1.4 µs** between LED and solenoid rising edges on this board — well inside the 10 µs budget. The fall edge is even tighter (single `GPIO.out_w1tc` register write in the ISR). No need to switch the rise to `GPIO.out_w1ts`; keep the readable two-line `digitalWrite()` pair in [src/fire.cpp:start_pulse](../src/fire.cpp). If a future board layout introduces gate ringing that compresses the budget, the atomic-write fallback is a one-line change.
+
+2. **Hardware-timer pulse width is rock-solid.** F2 measured a consistent **60 ms** pulse with no drift across many fires. The 1 MHz tick (80 MHz APB ÷ 80 divider) is the right granularity; sub-ms ISR latency is invisible at this scale. The `SOLENOID_MAX_PULSE_MS = 80` cap is documentary, never reached.
+
+3. **Cooldown gate works as specified.** F3 confirmed the 1500 ms `MIN_FIRE_GAP_MS` is enforced; rapid presses are silently rejected without queueing. The state machine in [src/fire_state.h](../src/fire_state.h) is the source of truth — Idle / Firing / CoolDown transitions match the design.
+
+4. **Battery refusal trips at the right voltage.** F5 confirmed `fire_ready` flips to `false` cleanly when the pack drops below `LOW_BATTERY_THRESHOLD_MV` (10 500 mV); presses are silently ignored, `fires_since_boot` doesn't tick. Recovery on charging is symmetric. The single-sample-per-tick ADC approach (no smoothing) is sufficient for v1 — the 600 mV margin to `CRITICAL_BATTERY_MV` swamps any flutter.
+
+5. **Fire button is correctly NOT a wake source.** F8 confirmed: while asleep, mashing the fire button (including held presses) does not wake the device. `esp_sleep_enable_ext0_wakeup()` is only called for `PIN_WAKE_BUTTON` and the `disable_wakeup_source(ALL)` line preceding it ensures GPIO 14 isn't accidentally armed. If a future variant wants the fire button to also wake, that's a one-line addition to [src/power.cpp:enter_sleep](../src/power.cpp) — the pin is already RTC-IO capable.
+
+6. **F4, F6, F7 deferred — known-safe by construction.**
+   - F4 (watchdog backstop): the ISR is the *only* code path that clears the gates. There's no main-loop fallback to fail. The architecture makes the test essentially "did I wire `IRAM_ATTR` correctly", which the build did.
+   - F6 (100 fires endurance): no counter overflow risk (`uint32_t`); no thermal concern at 60 ms / 2000 ms = 3 % duty. Trusted.
+   - F7 (sleep clears state): RAM-only state with no `RTC_DATA_ATTR` annotation; the chip's RAM is gone after deep-sleep by definition. Trusted.
+
+7. **Anticipated future work the v1 design parks.** ADC smoothing (median or rolling-mean of 5 samples) if real-world drain shows flutter at the threshold; `low_battery: bool` as a separate `/status` field if the editor needs to distinguish "cooldown" from "battery" precisely; `POST /sync` if a multi-slate coordination use case appears. None of these are needed for v1 sync.
 
 ---
 
@@ -1595,3 +1615,4 @@ This forces a clear scope confirmation, prevents drift, and keeps the implementa
 - Every phase leaves the system in a working state — the typewriter demo stays runnable until Phase 4 of the firmware (where it gets explicitly retired in favour of "show last received frame, or boot screen if none").
 - Conventional commits with `feat:` / `fix:` / `web:` / `hw:` / `docs:` / `test:` prefixes throughout.
 - The all-white/all-black smoke test in Phase 2 catches more bugs than any other single test. Run it.
+- **When a phase completes, update BOTH places:** the status table at the top (`✅ done` + landing date) AND the `## Phase N — …` heading in the body, which must end with `✅ **landed YYYY-MM-DD**` so the heading scans as authoritative. Same applies to bench-gate transitions: tick gates inline with `✅` and a date, and update the heading from `⏳ code landed YYYY-MM-DD; hardware bench pending` to `✅ landed YYYY-MM-DD`. Phases 6 and 7 had to be back-filled because this step was forgotten — don't repeat it.
