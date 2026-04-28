@@ -7,6 +7,7 @@
  */
 
 import { useEditorStore } from "./store";
+import { Button, HStack } from "./ui";
 
 export function HistoryButtons(): JSX.Element {
   // Subscribe to elements/selectedIds to force re-renders when history
@@ -21,34 +22,20 @@ export function HistoryButtons(): JSX.Element {
   void elements;
 
   return (
-    <div style={{ display: "flex", gap: 8 }}>
-      <button
-        type="button"
-        onClick={undo}
-        disabled={!canUndo()}
-        title="Undo (Ctrl+Z)"
-        style={{ padding: "6px 12px", fontSize: 14 }}
-      >
+    <HStack gap="sm">
+      <Button onClick={undo} disabled={!canUndo()} title="Undo (Ctrl+Z)">
         Undo
-      </button>
-      <button
-        type="button"
-        onClick={redo}
-        disabled={!canRedo()}
-        title="Redo (Ctrl+Y or Ctrl+Shift+Z)"
-        style={{ padding: "6px 12px", fontSize: 14 }}
-      >
+      </Button>
+      <Button onClick={redo} disabled={!canRedo()} title="Redo (Ctrl+Y or Ctrl+Shift+Z)">
         Redo
-      </button>
-      <button
-        type="button"
+      </Button>
+      <Button
         onClick={() => duplicateSelected()}
         disabled={selectedIds.length === 0}
         title="Duplicate selection (Ctrl+D)"
-        style={{ padding: "6px 12px", fontSize: 14 }}
       >
         Duplicate
-      </button>
-    </div>
+      </Button>
+    </HStack>
   );
 }

@@ -1,6 +1,8 @@
+import { useRef, useState } from "react";
+
 import { ICON_CATEGORIES, ICON_REGISTRY } from "./icons/registry";
 import { useEditorStore } from "./store";
-import { usePalette } from "./themeStore";
+import { type Palette, usePalette } from "./themeStore";
 import {
   clampTextSize,
   cssFontFamily,
@@ -9,6 +11,7 @@ import {
   MIN_TEXT_SIZE,
   TEXT_SIZE_PRESETS,
   type DitherAlgorithm,
+  type Element,
   type FontFamily,
   type TextAlign,
   type VerticalAlign,
@@ -363,6 +366,13 @@ export function PropertiesPanel(): JSX.Element {
           </label>
         </div>
       )}
+      {element ? (
+        <PositionInputs
+          element={element}
+          locked={element.locked}
+          palette={palette}
+        />
+      ) : null}
       {element && element.type !== "line" ? (
         <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "center" }}>
           <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -394,12 +404,241 @@ export function PropertiesPanel(): JSX.Element {
       ) : null}
       {element ? (
         <div style={{ marginTop: 10, color: palette.textMuted, fontSize: 11 }}>
-          {Math.round(element.x)}, {Math.round(element.y)} ·{" "}
-          {Math.round(element.w)} × {Math.round(element.h)}
-          {element.rotation ? ` · ${Math.round(element.rotation)}°` : ""}
-          {element.locked ? " · locked" : ""}
+          {element.rotation ? `· ${Math.round(element.rotation)}° ` : ""}
+          {element.locked ? "· locked" : ""}
         </div>
       ) : null}
     </div>
   );
+}
+
+/**
+ * Pixel-exact placement controls. Non-line elements show x / y / w /
+ * h; lines show x1 / y1 / x2 / y2 because that's the natural model
+ * for an endpoint-based shape (matches the Konva endpoint anchors).
+ *
+ * Edits commit on blur (and on Enter), not on every keystroke — the
+ * commit-time clampToFrame in the store is what enforces frame
+ * containment, so an in-flight intermediate value like "12" while
+ * the user types "120" doesn't trigger a snap-and-snap-back. A live
+ * onChange would also fight the existing drag handlers in
+ * EditorCanvas: a transform commit during typing would rewrite the
+ * input out from under the user.
+ */
+function PositionInputs({
+  element,
+  locked,
+  palette,
+}: {
+  element: Element;
+  locked: boolean;
+  palette: Palette;
+}): JSX.Element {
+  const moveElement = useEditorStore((s) => s.moveElement);
+  const resizeElement = useEditorStore((s) => s.resizeElement);
+  const updateLine = useEditorStore((s) => s.updateLine);
+
+  const fieldStyle: React.CSSProperties = {
+    width: 60,
+    fontSize: 12,
+    padding: "2px 4px",
+    background: palette.inputBg,
+    color: palette.text,
+    border: `1px solid ${palette.inputBorder}`,
+    borderRadius: 3,
+  };
+
+  if (element.type === "line") {
+    const x1 = Math.round(element.x);
+    const y1 = Math.round(element.y);
+    const x2 = Math.round(element.x + element.w);
+    const y2 = Math.round(element.y + element.h);
+    const commitEnd = (nextX2: number, nextY2: number) => {
+      if (locked) return;
+      updateLine(element.id, { w: nextX2 - element.x, h: nextY2 - element.y });
+    };
+    return (
+      <div
+        style={{
+          marginTop: 10,
+          display: "grid",
+          gridTemplateColumns: "auto 1fr auto 1fr",
+          gap: "4px 6px",
+          alignItems: "center",
+        }}
+      >
+        <CoordLabel palette={palette}>x₁</CoordLabel>
+        <CommitOnBlurNumber
+          value={x1}
+          disabled={locked}
+          style={fieldStyle}
+          commit={(n) => !locked && moveElement(element.id, { x: n, y: element.y })}
+        />
+        <CoordLabel palette={palette}>y₁</CoordLabel>
+        <CommitOnBlurNumber
+          value={y1}
+          disabled={locked}
+          style={fieldStyle}
+          commit={(n) => !locked && moveElement(element.id, { x: element.x, y: n })}
+        />
+        <CoordLabel palette={palette}>x₂</CoordLabel>
+        <CommitOnBlurNumber
+          value={x2}
+          disabled={locked}
+          style={fieldStyle}
+          commit={(n) => commitEnd(n, y2)}
+        />
+        <CoordLabel palette={palette}>y₂</CoordLabel>
+        <CommitOnBlurNumber
+          value={y2}
+          disabled={locked}
+          style={fieldStyle}
+          commit={(n) => commitEnd(x2, n)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        display: "grid",
+        gridTemplateColumns: "auto 1fr auto 1fr",
+        gap: "4px 6px",
+        alignItems: "center",
+      }}
+    >
+      <CoordLabel palette={palette}>x</CoordLabel>
+      <CommitOnBlurNumber
+        value={Math.round(element.x)}
+        disabled={locked}
+        style={fieldStyle}
+        commit={(n) => !locked && moveElement(element.id, { x: n, y: element.y })}
+      />
+      <CoordLabel palette={palette}>y</CoordLabel>
+      <CommitOnBlurNumber
+        value={Math.round(element.y)}
+        disabled={locked}
+        style={fieldStyle}
+        commit={(n) => !locked && moveElement(element.id, { x: element.x, y: n })}
+      />
+      <CoordLabel palette={palette}>w</CoordLabel>
+      <CommitOnBlurNumber
+        value={Math.round(element.w)}
+        disabled={locked}
+        min={1}
+        style={fieldStyle}
+        commit={(n) =>
+          !locked &&
+          resizeElement(element.id, {
+            x: element.x,
+            y: element.y,
+            w: Math.max(1, n),
+            h: element.h,
+          })
+        }
+      />
+      <CoordLabel palette={palette}>h</CoordLabel>
+      <CommitOnBlurNumber
+        value={Math.round(element.h)}
+        disabled={locked}
+        min={1}
+        style={fieldStyle}
+        commit={(n) =>
+          !locked &&
+          resizeElement(element.id, {
+            x: element.x,
+            y: element.y,
+            w: element.w,
+            h: Math.max(1, n),
+          })
+        }
+      />
+    </div>
+  );
+}
+
+function CoordLabel({
+  children,
+  palette,
+}: {
+  children: React.ReactNode;
+  palette: Palette;
+}): JSX.Element {
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        color: palette.textMuted,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        textAlign: "right",
+        paddingRight: 2,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+interface CommitOnBlurNumberProps {
+  value: number;
+  disabled?: boolean;
+  min?: number;
+  style?: React.CSSProperties;
+  commit: (value: number) => void;
+}
+
+function CommitOnBlurNumber({
+  value,
+  disabled,
+  min,
+  style,
+  commit,
+}: CommitOnBlurNumberProps): JSX.Element {
+  // Local draft so the input field doesn't fight the store while the
+  // user types. The committed value (from props) drives the field
+  // when the user isn't focused; the local draft drives it while
+  // focused. Switching back to props on blur means a re-render after
+  // an external change (drag, undo) shows the new value next time.
+  const [draft, setDraft] = useStateInputDraft(value);
+  return (
+    <input
+      type="number"
+      step={1}
+      value={draft}
+      disabled={disabled}
+      min={min}
+      style={style}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const n = Number(draft);
+        if (Number.isFinite(n)) commit(n);
+        else setDraft(String(value)); // restore on garbage input
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          (e.currentTarget as HTMLInputElement).blur();
+        } else if (e.key === "Escape") {
+          setDraft(String(value));
+          (e.currentTarget as HTMLInputElement).blur();
+        }
+      }}
+    />
+  );
+}
+
+/**
+ * useState wrapper that resets the draft when the upstream value
+ * changes (e.g. drag commit while not focused). Keeps the input
+ * legible without the user having to refresh.
+ */
+function useStateInputDraft(value: number): [string, (s: string) => void] {
+  const [draft, setDraft] = useState(String(value));
+  const prev = useRef(value);
+  if (prev.current !== value) {
+    prev.current = value;
+    if (draft !== String(value)) setDraft(String(value));
+  }
+  return [draft, setDraft];
 }

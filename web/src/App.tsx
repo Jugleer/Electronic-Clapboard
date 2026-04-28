@@ -17,10 +17,12 @@ import { HistoryButtons } from "./editor/HistoryButtons";
 import { LayoutButtons } from "./editor/LayoutButtons";
 import { Toolbar } from "./editor/Toolbar";
 import { useKeyboardShortcuts } from "./editor/useKeyboard";
+import { ShortcutOverlay } from "./editor/ShortcutOverlay";
 import { useFrameSink } from "./useFrameSink";
 import { useDeviceStatus, type DeviceStatusInfo } from "./useDeviceStatus";
 import { ScreensaverPanel } from "./screensaver/Screensaver";
 import { useThemeStore, usePalette, type Palette } from "./editor/themeStore";
+import { Button, HStack, Input } from "./editor/ui";
 
 export function App() {
   const stageRef = useRef<Konva.Stage | null>(null);
@@ -32,6 +34,8 @@ export function App() {
   const [fullRefresh, setFullRefresh] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [clipboardHint, setClipboardHint] = useState<string | null>(null);
   const { status, error, lastResult, send } = useFrameSink({ host });
   const deviceStatus = useDeviceStatus({ host });
   const elementCount = useEditorStore((s) => s.elements.length);
@@ -117,7 +121,16 @@ export function App() {
     void send(canvas, { full: effectiveFullRefresh });
   };
 
-  useKeyboardShortcuts(editingId === null, onSend);
+  useKeyboardShortcuts(editingId === null && !helpOpen, onSend, {
+    onShowHelp: () => setHelpOpen(true),
+    onClipboardError: (msg) => {
+      setClipboardHint(msg);
+      window.setTimeout(
+        () => setClipboardHint((current) => (current === msg ? null : current)),
+        2500,
+      );
+    },
+  });
 
   // Warm the film-category icon cache on mount so the very first user
   // interaction with the picker is instant. The other categories load
@@ -150,8 +163,17 @@ export function App() {
         minHeight: "100vh",
       }}
     >
-      <h1 style={{ marginTop: 0, color: palette.textHeading }}>
-        Electronic Clapboard — editor
+      <h1
+        style={{
+          marginTop: 0,
+          marginBottom: 16,
+          color: palette.textHeading,
+          fontSize: 22,
+          letterSpacing: -0.2,
+        }}
+      >
+        Electronic Clapboard
+        <span style={{ color: palette.textMuted, fontWeight: 400 }}> — editor</span>
       </h1>
 
       <section
@@ -159,111 +181,115 @@ export function App() {
           display: "flex",
           gap: 12,
           alignItems: "center",
-          marginBottom: 12,
+          marginBottom: 16,
           flexWrap: "wrap",
+          justifyContent: "space-between",
         }}
       >
-        <label htmlFor="host" style={{ fontWeight: 600 }}>
-          Target host:
-        </label>
-        <input
-          id="host"
-          type="text"
-          value={host}
-          onChange={(e) => setHost(e.target.value)}
-          onBlur={onHostBlur}
-          placeholder={DEFAULT_HOST}
-          style={{
-            fontFamily: "monospace",
-            padding: "4px 8px",
-            minWidth: 220,
-            background: palette.inputBg,
-            color: palette.text,
-            border: `1px solid ${palette.inputBorder}`,
-            borderRadius: 3,
-          }}
-        />
-        <DeviceStatusBadge info={deviceStatus} palette={palette} />
-        <button
-          type="button"
-          onClick={toggleTheme}
-          title={
-            themeMode === "dark"
-              ? "Switch to light mode"
-              : "Switch to dark mode"
-          }
-          style={{
-            padding: "4px 10px",
-            fontSize: 13,
-            background: palette.buttonBg,
-            color: palette.text,
-            border: `1px solid ${palette.buttonBorder}`,
-            borderRadius: 3,
-            cursor: "pointer",
-          }}
-        >
-          {themeMode === "dark" ? "☀ light" : "☾ dark"}
-        </button>
-        <label
+        {/* Left cluster: device connection. */}
+        <HStack gap="sm" wrap>
+          <label
+            htmlFor="host"
+            style={{ fontWeight: 500, fontSize: 13, color: palette.textMuted }}
+          >
+            Host
+          </label>
+          <Input
+            id="host"
+            type="text"
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            onBlur={onHostBlur}
+            placeholder={DEFAULT_HOST}
+            style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", minWidth: 220 }}
+          />
+          <DeviceStatusBadge info={deviceStatus} palette={palette} />
+        </HStack>
+
+        {/* Right cluster: send action + view controls. */}
+        <HStack gap="sm" wrap>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              fontSize: 13,
+              color: hasImage ? palette.textMuted : palette.text,
+              userSelect: "none",
+            }}
+            title={
+              hasImage
+                ? "Forced on: image elements need a full refresh to render without ghosting"
+                : "Forces a clean refresh (?full=1) — ~4 s render, clears ghosting"
+            }
+          >
+            <input
+              type="checkbox"
+              checked={effectiveFullRefresh}
+              disabled={hasImage}
+              onChange={(e) => setFullRefresh(e.target.checked)}
+            />
+            full refresh
+            {hasImage ? (
+              <span style={{ fontSize: 11, color: palette.textMuted }}>
+                (image)
+              </span>
+            ) : null}
+          </label>
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={onSend}
+            disabled={status === "sending" || elementCount === 0}
+          >
+            {status === "sending" ? "Sending…" : "Send to clapboard"}
+          </Button>
+          <Button
+            size="sm"
+            onClick={toggleTheme}
+            title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {themeMode === "dark" ? "☀ light" : "☾ dark"}
+          </Button>
+        </HStack>
+      </section>
+
+      {/* Status row: kept on its own line so it doesn't push the
+          send button around when long error messages appear. */}
+      {status !== "idle" || lockinActive ? (
+        <div
           style={{
             display: "flex",
+            gap: 8,
             alignItems: "center",
-            gap: 4,
+            marginBottom: 12,
             fontSize: 13,
-            color: hasImage ? "#666" : undefined,
           }}
-          title={
-            hasImage
-              ? "Forced on: image elements need a full refresh to render without ghosting"
-              : "Forces a clean refresh (?full=1) — ~4 s render, clears ghosting"
-          }
         >
-          <input
-            type="checkbox"
-            checked={effectiveFullRefresh}
-            disabled={hasImage}
-            onChange={(e) => setFullRefresh(e.target.checked)}
+          <StatusReadout
+            status={status}
+            error={error}
+            lastResult={lastResult}
+            palette={palette}
           />
-          full refresh
-          {hasImage ? (
-            <span style={{ fontSize: 11, color: palette.textMuted }}>
-              (image present)
+          {lockinActive ? (
+            <span style={{ color: palette.statusWarn }}>
+              · panel locking in saturation…
             </span>
           ) : null}
-        </label>
-        <button
-          type="button"
-          onClick={onSend}
-          disabled={status === "sending" || elementCount === 0}
-          style={{ padding: "8px 16px", fontSize: 16, fontWeight: 600 }}
-        >
-          {status === "sending" ? "Sending…" : "Send to clapboard"}
-        </button>
-        <StatusReadout
-          status={status}
-          error={error}
-          lastResult={lastResult}
-          palette={palette}
-        />
-        {lockinActive ? (
-          <span style={{ color: palette.statusWarn, fontSize: 13 }}>
-            · panel locking in saturation…
-          </span>
-        ) : null}
-      </section>
+        </div>
+      ) : null}
 
       <section style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <Toolbar />
-            <button
-              type="button"
+            <Button
               onClick={() => fileInputRef.current?.click()}
-              style={{ padding: "6px 12px", fontSize: 14 }}
               title="Upload a PNG or JPG image (or drop one onto the canvas)"
             >
               + Image
-            </button>
+            </Button>
             <input
               ref={fileInputRef}
               type="file"
@@ -271,14 +297,12 @@ export function App() {
               onChange={onPickFile("fit")}
               style={{ display: "none" }}
             />
-            <button
-              type="button"
+            <Button
               onClick={() => bgInputRef.current?.click()}
-              style={{ padding: "6px 12px", fontSize: 14 }}
               title="Upload a PNG or JPG to fill the canvas as a background layer"
             >
               + Background
-            </button>
+            </Button>
             <input
               ref={bgInputRef}
               type="file"
@@ -318,16 +342,29 @@ export function App() {
               setEditingId={setEditingId}
             />
           </div>
-          <p style={{ color: palette.textMuted, margin: 0, fontSize: 12, maxWidth: 800 }}>
-            800×480 frame, 1bpp MSB-first, 1 = ink. Click a tool to add an
-            element; drag to move, drag corners to resize, double-click text
-            to edit. Drop a PNG / JPG onto the canvas (or use + Image) to add
-            a photo with adjustable threshold. Shift+click and marquee-drag to
-            multi-select. Hold Shift while dragging to lock movement to an
-            axis. Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D duplicates, Ctrl+A
-            selects all, Ctrl+G groups (Ctrl+Shift+G ungroups), Ctrl+Enter
-            sends, Delete removes, arrow keys nudge.
-          </p>
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              fontSize: 12,
+              color: palette.textMuted,
+            }}
+          >
+            <span>800×480 frame, 1bpp MSB-first, 1 = ink.</span>
+            <Button
+              size="sm"
+              onClick={() => setHelpOpen(true)}
+              title="Show keyboard shortcuts (?)"
+            >
+              ? shortcuts
+            </Button>
+            {clipboardHint ? (
+              <span style={{ color: palette.statusWarn }}>
+                · {clipboardHint}
+              </span>
+            ) : null}
+          </div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 260 }}>
           <PropertiesPanel />
@@ -335,6 +372,7 @@ export function App() {
           <IconPicker />
         </div>
       </section>
+      <ShortcutOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
     </main>
   );
 }

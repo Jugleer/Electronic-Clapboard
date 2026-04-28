@@ -1,5 +1,6 @@
 import { useEditorStore } from "./store";
 import type { AlignSide, DistributeAxis } from "./store";
+import { Button, HStack } from "./ui";
 
 const ALIGN_BUTTONS: { side: AlignSide; label: string; title: string }[] = [
   { side: "left", label: "⫷", title: "Align left" },
@@ -19,6 +20,8 @@ const DISTRIBUTE_BUTTONS: {
   { axis: "vertical", label: "↕", title: "Distribute vertically" },
 ];
 
+const ICON_STYLE: React.CSSProperties = { minWidth: 32 };
+
 export function AlignButtons(): JSX.Element {
   const selectedCount = useEditorStore((s) => s.selectedIds.length);
   const alignSelected = useEditorStore((s) => s.alignSelected);
@@ -27,32 +30,32 @@ export function AlignButtons(): JSX.Element {
   const distributeDisabled = selectedCount < 3;
 
   return (
-    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+    <HStack gap="xs" wrap>
       {ALIGN_BUTTONS.map((b) => (
-        <button
+        <Button
           key={b.side}
-          type="button"
+          size="sm"
           onClick={() => alignSelected(b.side)}
           disabled={alignDisabled}
           title={b.title}
-          style={{ padding: "4px 8px", fontSize: 14, minWidth: 28 }}
+          style={ICON_STYLE}
         >
           {b.label}
-        </button>
+        </Button>
       ))}
       <span style={{ width: 8 }} />
       {DISTRIBUTE_BUTTONS.map((b) => (
-        <button
+        <Button
           key={b.axis}
-          type="button"
+          size="sm"
           onClick={() => distributeSelected(b.axis)}
           disabled={distributeDisabled}
           title={b.title}
-          style={{ padding: "4px 8px", fontSize: 14, minWidth: 28 }}
+          style={ICON_STYLE}
         >
           {b.label}
-        </button>
+        </Button>
       ))}
-    </div>
+    </HStack>
   );
 }

@@ -1,4 +1,5 @@
 import { useEditorStore } from "./store";
+import { Button, HStack } from "./ui";
 
 export function GroupButtons(): JSX.Element {
   const elements = useEditorStore((s) => s.elements);
@@ -12,25 +13,21 @@ export function GroupButtons(): JSX.Element {
   );
 
   return (
-    <div style={{ display: "flex", gap: 8 }}>
-      <button
-        type="button"
+    <HStack gap="sm">
+      <Button
         onClick={() => groupSelected()}
         disabled={!canGroup}
         title="Group selected (Ctrl+G)"
-        style={{ padding: "6px 12px", fontSize: 14 }}
       >
         Group
-      </button>
-      <button
-        type="button"
+      </Button>
+      <Button
         onClick={ungroupSelected}
         disabled={!canUngroup}
         title="Ungroup selected (Ctrl+Shift+G)"
-        style={{ padding: "6px 12px", fontSize: 14 }}
       >
         Ungroup
-      </button>
-    </div>
+      </Button>
+    </HStack>
   );
 }

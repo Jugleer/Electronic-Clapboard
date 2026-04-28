@@ -54,6 +54,10 @@ export interface EditorActions {
     position: { x: number; y: number },
     options?: { src?: string; dataUrl?: string; w?: number; h?: number },
   ) => ElementId;
+  /** Append a batch of pre-built elements (e.g. from a clipboard
+   *  paste) and select them. Caller is responsible for fresh ids and
+   *  group-id remapping; the store just appends + clamps to frame. */
+  addElements: (elements: Element[]) => ElementId[];
   selectElement: (id: ElementId, additive?: boolean) => void;
   selectMany: (ids: ElementId[]) => void;
   clearSelection: () => void;
@@ -94,6 +98,18 @@ let idCounter = 0;
 function nextId(): ElementId {
   idCounter += 1;
   return `el_${idCounter}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Public id factories for clipboard / import paths. The internal
+ *  store actions use `nextId()` directly; callers building a batch
+ *  outside the store (paste, layout import) need both an element id
+ *  and a group id factory consistent with the in-store conventions. */
+export function freshElementId(): ElementId {
+  return nextId();
+}
+export function freshGroupId(): GroupId {
+  idCounter += 1;
+  return `g_${idCounter}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 const NUDGE_SMALL = 1;
@@ -249,6 +265,19 @@ export function createEditorStore(): UseBoundStore<StoreApi<EditorStore>> {
           return { elements: [...state.elements, el], selectedIds: [id] };
         });
         return id;
+      },
+
+      addElements: (incoming) => {
+        if (incoming.length === 0) return [];
+        const ids: ElementId[] = incoming.map((el) => el.id);
+        commit((state) => {
+          const clamped = incoming.map((el) => clampToFrame(el));
+          return {
+            elements: [...state.elements, ...clamped],
+            selectedIds: ids,
+          };
+        });
+        return ids;
       },
 
       selectElement: (id, additive = false) =>

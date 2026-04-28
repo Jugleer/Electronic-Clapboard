@@ -1,5 +1,6 @@
 import { useEditorStore } from "./store";
 import type { ElementType } from "./types";
+import { Button, HStack } from "./ui";
 
 const ADD_BUTTONS: { type: ElementType; label: string }[] = [
   { type: "text", label: "+ Text" },
@@ -12,17 +13,12 @@ const PLACEMENT = { x: 80, y: 80 };
 export function Toolbar(): JSX.Element {
   const addElement = useEditorStore((s) => s.addElement);
   return (
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+    <HStack gap="sm" wrap>
       {ADD_BUTTONS.map((b) => (
-        <button
-          key={b.type}
-          type="button"
-          onClick={() => addElement(b.type, PLACEMENT)}
-          style={{ padding: "6px 12px", fontSize: 14 }}
-        >
+        <Button key={b.type} onClick={() => addElement(b.type, PLACEMENT)}>
           {b.label}
-        </button>
+        </Button>
       ))}
-    </div>
+    </HStack>
   );
 }
