@@ -44,7 +44,7 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 7     | Layout save/load (IndexedDB; `/sync` deferred)        | ✅ done     | 2026-04-27 |
 | 8     | Sleep / wake architecture                             | ✅ done     | 2026-04-28 |
 | 9     | Sync mechanism — physical fire button                 | ✅ done     | 2026-04-28 |
-| 10    | Untethered screensaver cycling (timer-wake)           | 🔜 planned  | —          |
+| 10    | Untethered screensaver cycling (timer-wake)           | 🔜 scoped   | —          |
 
 **Firmware version:** `0.4.0` (Phase 9 added fire fields + fire path).
 **Test totals:** 167 vitest cases across 14 files, 67 native Unity
@@ -1562,11 +1562,100 @@ Bench results from 2026-04-28 + the architectural decisions worth remembering fo
 
 ---
 
-## Phase 10 — Untethered screensaver cycling 🔜 **planned**
+## Phase 10 — Untethered screensaver cycling 🔜 **scoped 2026-04-28**
 
-**Slice (placeholder; flesh out at Phase 10 kickoff):** RTC timer wake on a configurable interval rotates through a saved set of layouts on the panel without external interaction. Builds on Phase 8 plumbing (timer-wake branch already present in `power::WakeReason::Timer` and `main_net.cpp`'s `if (wake_reason() != Timer)` boot-splash skip).
+**Slice delivered:** The device stores up to 50 pre-rendered slates in flash and cycles through them on a configurable cadence (60 s – 7 d, default 5 min) without any external device connected. Wi-Fi stays off between ticks; only an RTC timer wakes the chip, paints the next slate, and drops back to deep-sleep. Picker mode is `round_robin` by default; opt-in `wallclock_hybrid` mode (D2-hybrid: same slate at the same wall-clock moment, multi-device synchronised) falls back to `round_robin` until NTP sync has anchored the wall clock at least once. Editor side: the Phase 8 screensaver panel rebuilds as a slate-set manager that pushes / renames / reorders / deletes slates on the device and tweaks the cycle interval — no live coordination from the editor is required for the cycle itself.
 
-Original Phase 9 in earlier drafts. Renumbered when the sync-button slice landed in this position.
+Builds on Phase 8 plumbing: `power::WakeReason::Timer` is already wired, and `main_net.cpp`'s `if (wake_reason() != Timer)` boot-splash skip is the hook this phase fills in. Original Phase 9 in earlier drafts; renumbered when the sync-button slice landed in this position.
+
+### What lands
+
+#### Firmware
+- **LittleFS partition** for slate storage. Custom `slate_data` partition (~2.4 MB, sized for 50 × 48 KB) added to the existing 16 MB partition table. LittleFS preferred over a raw partition for the rename-atomicity and listing semantics — the marginal flash cost is negligible.
+- **Atomic slot writes.** Frame body lands in `/screensaver/slot_N.bin.tmp`, manifest changes go to `/screensaver/manifest.json.tmp`, then both are renamed into place. Power cut mid-write leaves the previous slot intact. On boot, the firmware reconciles manifest vs disk: orphan files re-registered with default names, orphan manifest entries dropped.
+- **`src/screensaver_state.h`** — pure header-only state machine: tick scheduling, picker-mode resolution (round-robin counter vs wallclock-mod-N), enabled/disabled gating, occupied-slot iteration. Linked into `[env:native]` and unit-tested without Arduino. Mirrors `power_state.h` / `fire_state.h`.
+- **`src/screensaver.{h,cpp}`** — Arduino-side glue: LittleFS init, slot read/write, manifest serialisation, RTC timer-wake arming, NVS persistence of `current_slot` (round-robin) and `wallclock_anchor_us` (D2-hybrid). Calls into `display::draw_full_white` + `display::draw_partial_content` reusing the deferred-lockin path from Phase 4.
+- **`src/wallclock.{h,cpp}`** — SNTP sync at the end of `net::begin()` on a wake-button wake; persists the wall-clock anchor to NVS (only the seconds since the unix epoch + the device millis at sync). On a timer-wake, the firmware never starts Wi-Fi, so the only wall-clock source is the persisted anchor + the chip's internal RTC µs counter (which survives deep-sleep timer-wakes).
+- **Boot path bifurcation in `main_net.cpp`.** On `WakeReason::Timer`: skip Wi-Fi, skip log-server, skip frame-server; just `screensaver::tick_and_resleep()` and `esp_deep_sleep_start()` again. On `WakeReason::Button` / `ColdBoot`: existing behaviour, plus the screensaver cycle is *paused* for the awake session so the editor can write to it without racing the auto-tick.
+- **HTTP routes** per [protocol.md §2.6](./protocol.md#26-screensaver--on-device-cycling-slate-set-phase-10):
+  - `GET /screensaver/manifest`
+  - `POST /screensaver/frame?slot=N[&name=...]` (48 000-byte body, atomic)
+  - `DELETE /screensaver/frame?slot=N`
+  - `POST /screensaver/config` (JSON: enabled / cycle_interval_s / picker_mode)
+- **`firmware_version` bump** to `0.5.0`. Phase-9 fields stay; new fields appear in `/screensaver/manifest`, not `/status`.
+
+#### Editor
+- **Screensaver panel rebuild.** [web/src/screensaver/Screensaver.tsx](../web/src/screensaver/Screensaver.tsx) currently runs a browser-driven `setInterval` against `/frame`; that becomes obsolete on Phase 10 and is replaced with a slate-set manager that:
+  - Lists current slates from `/screensaver/manifest` (slot index, name, bytes, updated_at).
+  - "Push current canvas → slot N" button (rasterises the editor canvas, POSTs to `/screensaver/frame?slot=N`).
+  - "Push from saved layout" picker (rasterises an IndexedDB layout, POSTs).
+  - Per-slot rename (PATCH-style: `POST /screensaver/frame` with the same body + new `name=`; or a separate `POST /screensaver/rename` if cleaner — decide in implementation).
+  - Per-slot delete (`DELETE /screensaver/frame?slot=N`) with confirm.
+  - Cycle interval input (number input, 60 .. 604800 s; client-side validation).
+  - Enable / disable toggle.
+  - Picker mode select (`round_robin` / `wallclock_hybrid`); if `wallclock_hybrid` is selected but `rtc_synced: false`, a tooltip explains the fallback behaviour.
+  - Live "now playing" indicator from `current_slot` in the manifest.
+- **`web/src/screensaver/sendImage.ts`** keeps its existing role for pushing the bundled illusion seeds (`web/src/assets/screensaver/`) — they become the default seed set the user can push if they want a quick start.
+- **`web/src/screensaver/manifest.ts`** — typed wrappers for the four endpoints. Mirrors the discipline of [web/src/sendFrame.ts](../web/src/sendFrame.ts) (timeouts, 503 retry per §4).
+
+### Acceptance tests
+
+#### Native (test-first)
+- **`test_screensaver_state`** (new). Cases mirroring `test_fire_state` shape:
+  - empty cycle (no occupied slots) — picker returns no result; cycle disabled
+  - single slot — round-robin ticks always pick slot 0
+  - five slots, sparse (slots 0, 2, 5, 9, 12) — round-robin iterates only occupied slots
+  - delete-mid-cycle — picker skips the deleted slot on the next tick
+  - wallclock-hybrid with `rtc_synced=false` — falls back to round-robin; `picker_mode_actual: "round_robin"`
+  - wallclock-hybrid with anchored RTC — `(unix_seconds / interval) mod N` stable across the same minute
+  - cycle interval out of bounds — clamped to [min, max]; bad values surface a `bad_config` slug
+  - millis() rollover during a tick window — next-tick computation stays correct
+- **`test_screensaver_manifest`** (new). Round-trips a manifest through the JSON serialiser; field-name lock-in mirrors `test_status_json`. Includes the `picker_mode_actual` divergence from `picker_mode` when RTC isn't synced.
+- **Hardware-in-the-loop tests** (deferred to bench gates). Pure flash-write atomicity is hard to test in the host environment; the bench gates below cover it.
+
+#### Editor
+- **`Screensaver.test.tsx`** (extended). New cases cover:
+  - Manifest fetch + render of slot list.
+  - Push-current-canvas flow (mocks the canvas → `POST /screensaver/frame`).
+  - Cycle-interval input clamping at the boundaries.
+  - Picker-mode select with the `rtc_synced: false` warning copy.
+  - Empty-list state (no slates → "push your first slate to get started").
+- **`screensaver/manifest.test.ts`** (new). 4xx / 5xx / 503-retry / network-failure paths for each of the four endpoints.
+
+### Bench gates (run after firmware lands)
+
+- **Gate S1 — push slate, see it on next tick.** Editor-push a slate to slot 0 with the device awake. Long-press to sleep. Wait the cycle interval (set to 60 s for the test). Panel should paint the pushed slate; status LED stays dark; `ping clapboard.local` continues to fail (Wi-Fi off).
+- **Gate S2 — round-robin walks N slots in order.** Push 3 distinct slates (slot 0/1/2), enable, set interval to 60 s, sleep. Watch the panel cycle 0 → 1 → 2 → 0 → ... at 60 s cadence over ~5 minutes.
+- **Gate S3 — atomic write survives power cut.** Push a slate to slot 5. Mid-`POST /screensaver/frame` (large enough body that the LittleFS write is observable on the wire), pull power. Re-power. `GET /screensaver/manifest` shows slot 5 with the *previous* contents (or absent if it was never populated), never a torn frame. Re-push completes successfully.
+- **Gate S4 — wallclock-hybrid sync.** Configure `picker_mode: "wallclock_hybrid"`. Manifest reads `picker_mode_actual: "round_robin"` until the device has been wake-button-woken once with Wi-Fi reachable; after that, `picker_mode_actual: "wallclock_hybrid"` and `rtc_synced: true`. Across two devices on the same LAN with the same slot set + interval, both should paint the same slot at the same wall-clock minute.
+- **Gate S5 — current draw on a 5-min cycle.** Multimeter on the 3S pack across a full cycle. Average draw ≈ deep-sleep floor (~0.3 mA) plus the ~5-second tick burst (panel ~25 mA peak). Order of magnitude check, not a precise figure.
+- **Gate S6 — disabled cycle truly disables.** `POST /screensaver/config` with `enabled: false`. Long-press to sleep. Device must not auto-wake on the previous interval — only the wake button brings it up.
+- **Gate S7 — empty-cycle force-disable.** Delete every slot. Manifest shows `enabled: false` even if the user previously set it to true. The firmware refuses to arm the timer with nothing to render.
+- **Gate S8 — power-cycle drops wallclock anchor.** Configure wallclock-hybrid + push slates + sleep (so RTC anchor is live). Pull power for 30 seconds. Re-power. Manifest should read `rtc_synced: false` and `picker_mode_actual: "round_robin"` until the next wake-button wake re-syncs.
+
+### Risks (already considered)
+
+- **LittleFS write interruption.** Mid-write power loss is the realistic failure mode on a battery-powered slate. Atomic write-then-rename + manifest reconciliation on boot is the standard mitigation; LittleFS gives us the rename atomicity for free. **Bench gate S3** is the load-bearing test.
+- **Wallclock-hybrid surprises.** Two callouts already discussed in the kickoff: cold-boot loses the anchor; changing the cycle interval mid-run jumps the index. Documented in [protocol.md §2.6](./protocol.md). The `picker_mode_actual` field is what saves the editor from showing a misleading "synchronised" indicator.
+- **Timer-wake awake-time creep.** Each tick is ~5 s of awake time (panel re-init + full refresh). At a 60 s minimum interval that's ~8 % duty cycle in panel-active terms — 50 cycles ≈ 250 s of panel updates / hour. The 7.5" V2 panel is rated for tens of millions of updates, so this isn't a panel-life concern, but the 60 s floor stops a misconfiguration burning cycles for no reason.
+- **NTP failure modes.** If Wi-Fi associates but the SNTP query fails (firewall, no internet), the device stays in `rtc_synced: false` indefinitely. Editor surfaces this; firmware doesn't error. Future work: a "set wallclock" endpoint where the editor pushes its own `Date.now()` if NTP is unreachable.
+- **Editor-while-cycling race.** Documented away by *pausing* the cycle on a wake-button wake. The editor can't write to a slot while a tick is rendering it — the cycle is paused as soon as the user wakes the device. Resumes on the next sleep.
+- **Partition resize migration.** Adding a `slate_data` partition changes the partition table. First Phase-10 flash will erase any existing user data on the device. Document in the README; CI builds with the new partition table from the start.
+
+### Hand-off
+
+Phase 10 firmware + editor work begins after this protocol contract + plan land (this commit cycle). Test-first cadence:
+1. `screensaver_state` native tests + state-machine implementation.
+2. Manifest serialiser + `test_screensaver_manifest`.
+3. LittleFS slot manager + atomic-write semantics; verified on bench (S3).
+4. RTC timer-wake path; verified on bench (S2, S5, S6).
+5. Wallclock-hybrid + NTP anchoring; verified on bench (S4, S8).
+6. Editor panel rebuild + endpoint wrappers + tests.
+7. End-to-end bench (S1–S8) before sign-off.
+
+### Phase 10 implementation notes (read me before Phase 11+)
+
+Append on landing.
 
 ---
 

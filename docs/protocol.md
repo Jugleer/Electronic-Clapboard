@@ -308,6 +308,215 @@ asleep, presses on `PIN_FIRE_BUTTON` are ignored (it isn't routed
 through ext0). Use the wake button (`PIN_WAKE_BUTTON`) to bring the
 device back up; only then does the fire path arm.
 
+### 2.6 Screensaver — on-device cycling slate set (Phase 10+)
+
+The device can store up to **50 pre-rendered slates** in flash and
+cycle through them on a configurable interval, untethered, with Wi-Fi
+off between ticks. The editor pushes slates over HTTP while the device
+is awake and configures the cadence; the firmware then drives the
+cycle autonomously, RTC-timer-waking out of deep sleep, painting the
+next slate, and dropping back to sleep.
+
+#### Storage model
+
+Slates live in a LittleFS partition under `/screensaver/`:
+
+```
+/screensaver/manifest.json    — atomically-rewritten metadata
+/screensaver/slot_0.bin       — raw 48 000-byte 1-bit frame
+/screensaver/slot_3.bin       — sparse: only occupied slots have files
+...
+```
+
+Slot indices are **0..49 inclusive** (50-slot cap). Slots are sparse —
+deleting slot 5 leaves slots 6+ untouched. The cycle iterates
+*occupied* slots only; an empty cycle (no slots) force-disables the
+screensaver.
+
+Slate writes are **atomic**: incoming bytes go to `slot_N.bin.tmp`,
+manifest changes go to `manifest.json.tmp`, then both are renamed
+into place. A power cut mid-write leaves the previous slot intact.
+On boot, the firmware reconciles the manifest against the actual
+files on disk — orphaned `slot_N.bin` files (slot exists but
+manifest forgot it) are re-registered with a default name; orphaned
+manifest entries (manifest claims a slot but the file is missing)
+are dropped.
+
+#### Picker mode (which slot is "now playing")
+
+Two modes, configurable per device:
+
+- **`round_robin`** (default, always available). The firmware keeps
+  a slot index in NVS, increments it on each tick mod the occupied-
+  slot count. Survives deep-sleep timer-wakes and power cycles.
+  Predictable but interval changes shift only *when* the next tick
+  fires.
+- **`wallclock_hybrid`** (D2-hybrid). When the firmware has a valid
+  wall-clock time (NTP-synced during a wake-button awake session,
+  preserved across deep-sleep timer wakes via the chip's internal
+  RTC µs counter), the slot index is computed as
+  `(unix_seconds / cycle_interval_s) mod N` so the *same slate*
+  always shows at the *same wall-clock moment* — multi-device sync
+  is implicit. **Falls back to `round_robin`** when wall-clock is
+  not yet anchored (cold boot until first NTP sync; manifest's
+  `picker_mode_actual` reflects the running mode).
+
+Wall-clock anchoring happens automatically on any wake-button wake
+(SNTP via the existing Wi-Fi association). Once anchored, the µs
+counter survives all deep-sleep timer wakes for as long as power is
+maintained. A power cycle drops the anchor; the device falls back to
+`round_robin` until the next wake-button wake.
+
+#### Cycle interval bounds
+
+| Bound        | Value    | Why                                    |
+| ------------ | -------- | -------------------------------------- |
+| Min          | 60 s     | Below this the panel barely settles between full refreshes; cycling that fast also burns the panel's update budget. |
+| Max          | 604 800 s (7 d) | A film-set slate isn't a long-term art piece. |
+| Default      | 300 s (5 min) | Comfortable browse rate; ~3 % of 5 min is the e-paper update; the rest is deep-sleep. |
+
+#### Behaviour during a cycle tick (timer-wake)
+
+1. RTC timer fires, chip wakes from deep-sleep with
+   `wake_reason() == Timer`.
+2. Wi-Fi stays OFF. The HTTP server does not start. The TCP log on
+   port 23 does not start. `/status`, `/frame`, etc. are unreachable
+   for the duration of the tick.
+3. Firmware re-powers the e-paper panel rail, picks the next slot
+   per the configured mode, runs a **full refresh** (deferred-lockin
+   path from §2.1 reused — the same panel-saturation gotcha applies).
+4. NVS round-robin counter advances (in `round_robin`) or is left
+   alone (in `wallclock_hybrid`, since the index is derived).
+5. RTC timer is re-armed for the next interval; `esp_deep_sleep_start()`
+   re-entered.
+
+Total awake time per tick is ~5 s (panel re-init + full refresh).
+Average current draw across a 5-minute cycle is dominated by the
+deep-sleep floor (~0.3 mA) plus the brief tick burst.
+
+#### Behaviour during a wake-button wake
+
+Standard behaviour — full Wi-Fi association, HTTP server up, /status
+reachable, panel painted with the boot splash. **The screensaver
+cycle is paused while the device is awake on a wake-button wake** —
+the editor would otherwise race the auto-tick over the same panel.
+The cycle resumes when the user long-presses back to sleep.
+
+#### Endpoints
+
+##### `GET /screensaver/manifest`
+
+| Field | Value |
+|-------|-------|
+| Method | `GET` |
+| Response | JSON, see below |
+
+```json
+{
+  "ok": true,
+  "enabled": false,
+  "cycle_interval_s": 300,
+  "min_cycle_interval_s": 60,
+  "max_cycle_interval_s": 604800,
+  "max_slots": 50,
+  "picker_mode": "round_robin",
+  "picker_mode_actual": "round_robin",
+  "rtc_synced": false,
+  "current_slot": 0,
+  "last_tick_ms": null,
+  "next_tick_ms": null,
+  "slots": [
+    { "slot": 0, "name": "studio-blue",   "bytes": 48000, "updated_at_ms": 12345 },
+    { "slot": 3, "name": "penrose-tri",   "bytes": 48000, "updated_at_ms": 67890 }
+  ]
+}
+```
+
+- `picker_mode` is what the user *requested*; `picker_mode_actual`
+  is what's *running*. They diverge while `wallclock_hybrid` is
+  configured but `rtc_synced: false`.
+- `current_slot` is the slot most recently rendered (or about to be
+  rendered on the very next tick). `null` if no slots are populated.
+- `last_tick_ms` / `next_tick_ms` are device `millis()`, not wall
+  clock. `null` until the first tick has run / when disabled.
+- `slots` is ascending by slot index, occupied slots only.
+
+##### `POST /screensaver/frame?slot=<n>[&name=<urlenc>]`
+
+| Field | Value |
+|-------|-------|
+| Method | `POST` |
+| Content-Type | `application/octet-stream` |
+| Content-Length | **must equal 48 000** exactly |
+| Body | Raw 1-bit packed bytes per §1 |
+| Query: `slot` | required, 0..49 |
+| Query: `name` | optional, URL-encoded, ≤ 32 chars (display name) |
+
+Idempotent overwrite. Atomic: a partial write doesn't corrupt the
+existing slot. On success returns `{ "ok": true, "slot": N, "bytes": 48000, "name": "..." }`.
+
+| Status | Meaning | Slug |
+|--------|---------|------|
+| `200` | Slot written | — |
+| `400` | Bad slot index, bad name length, or `Content-Length ≠ 48000` | `bad_size`, `bad_slot`, `bad_name` |
+| `413` | `Content-Length` > 48 000 | `too_large` |
+| `415` | Wrong/missing `Content-Type` | `bad_content_type` |
+| `503` | A `/frame` or `/screensaver/*` write is already in flight | `busy` |
+
+Per §4, clients retry `503` with the same back-off as `/frame`.
+
+##### `DELETE /screensaver/frame?slot=<n>`
+
+| Field | Value |
+|-------|-------|
+| Method | `DELETE` |
+| Query: `slot` | required, 0..49 |
+
+Removes the slot's file and its manifest entry, atomically. Returns
+`200` with the post-delete slot count, or `404` (`slot_empty`) if
+the slot wasn't populated.
+
+##### `POST /screensaver/config`
+
+| Field | Value |
+|-------|-------|
+| Method | `POST` |
+| Content-Type | `application/json` |
+| Body | see below |
+
+```json
+{
+  "enabled": true,
+  "cycle_interval_s": 300,
+  "picker_mode": "round_robin"
+}
+```
+
+All three fields are optional; only the present ones are updated.
+`picker_mode` accepts `"round_robin"` or `"wallclock_hybrid"`.
+`cycle_interval_s` must satisfy
+`min_cycle_interval_s <= x <= max_cycle_interval_s` from the
+manifest.
+
+If `enabled: true` is set but no slots are populated, the firmware
+silently keeps `enabled: false` (no point arming a timer with
+nothing to render). The response carries the resulting effective
+config so the editor can show the truth.
+
+| Status | Meaning | Slug |
+|--------|---------|------|
+| `200` | Config applied; manifest mirrored in body | — |
+| `400` | Out-of-range interval, bad `picker_mode`, or unknown field | `bad_config` |
+| `415` | Wrong `Content-Type` | `bad_content_type` |
+
+#### Versioning note
+
+These endpoints are versioned alongside the rest of the protocol per
+§5. `/screensaver/manifest` may add fields without a major bump;
+existing fields' types are stable. The `picker_mode` enum may be
+extended (e.g. a future `"shuffle"` mode); clients must tolerate
+unknown values gracefully (treat as `round_robin` for display).
+
 ---
 
 ## 3. CORS
@@ -327,13 +536,17 @@ means the headers are missing on a redirect or error path.
 
 ## 4. Timeouts and retry
 
-| Operation          | Client timeout | Notes                                          |
-| ------------------ | -------------- | ---------------------------------------------- |
-| `GET /status`      | 3 s            | If exceeded, mark device unreachable.          |
-| `POST /frame`      | 10 s           | Full refresh on this panel can take ~4 s.      |
-| Retry on `503`     | back off       | First retry at 500 ms, then 1 s, then give up. |
-| Retry on `5xx`     | once           | Don't hammer a wedged device.                  |
-| Retry on network   | once           | mDNS/DHCP can blip during boot.                |
+| Operation                   | Client timeout | Notes                                          |
+| --------------------------- | -------------- | ---------------------------------------------- |
+| `GET /status`               | 3 s            | If exceeded, mark device unreachable.          |
+| `GET /screensaver/manifest` | 3 s            | Same as `/status` — read-only.                 |
+| `POST /frame`               | 10 s           | Full refresh on this panel can take ~4 s.      |
+| `POST /screensaver/frame`   | 10 s           | LittleFS write of a 48 KB blob — typically <500 ms but the panel may be mid-paint on a wake-button wake. |
+| `POST /screensaver/config`  | 3 s            | Tiny body; no flash write of frame data.       |
+| `DELETE /screensaver/frame` | 3 s            | Manifest rewrite + file unlink.                |
+| Retry on `503`              | back off       | First retry at 500 ms, then 1 s, then give up. |
+| Retry on `5xx`              | once           | Don't hammer a wedged device.                  |
+| Retry on network            | once           | mDNS/DHCP can blip during boot.                |
 
 Clients **must not** retry on `4xx` — the request itself is wrong.
 
@@ -357,8 +570,12 @@ the schema diverges from firmware semver.
 - Diff frames / partial region updates over the wire (we send the whole 48 KB).
 - Authentication. The firmware is on a trusted LAN.
 - Live-preview streaming while typing. Send is explicit per click.
-- Multi-page templates / saved layouts on-device. Layouts live in browser
-  IndexedDB.
+- ~~Multi-page templates / saved layouts on-device.~~ As of Phase 10
+  the device stores up to 50 pre-rendered slates for screensaver
+  cycling (§2.6). Editor-side layout management still lives in
+  browser IndexedDB; the device only stores the *rendered output* of
+  the slates the user has explicitly pushed for cycling.
+- `POST /sync` (software-triggered fire). Button-only, see §2.3.
 
 ---
 
