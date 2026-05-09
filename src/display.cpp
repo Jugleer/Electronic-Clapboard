@@ -85,35 +85,51 @@ void show_boot_screen(const char* firmware_version,
         // Title.
         epd.setTextColor(GxEPD_BLACK);
         epd.setFont();  // built-in 5x7 (default size 1)
-        epd.setTextSize(6);
-        epd.setCursor(60, 60);
+        epd.setTextSize(5);
+        epd.setCursor(60, 40);
         epd.print("E-CLAPBOARD");
 
         // Subtitle.
         epd.setTextSize(2);
-        epd.setCursor(60, 150);
+        epd.setCursor(60, 110);
         epd.print("Boot screen / firmware update");
 
         // Firmware version.
-        epd.setTextSize(3);
-        epd.setCursor(60, 210);
+        epd.setTextSize(2);
+        epd.setCursor(60, 160);
         epd.print("Firmware: ");
         epd.print(firmware_version ? firmware_version : "?");
 
         // Network info.
-        epd.setTextSize(3);
-        epd.setCursor(60, 270);
+        epd.setCursor(60, 195);
         epd.print("Host:     ");
         epd.print(hostname ? hostname : "?");
 
-        epd.setCursor(60, 320);
+        epd.setCursor(60, 230);
         epd.print("IP:       ");
         epd.print(ip_address ? ip_address : "?");
 
+        // How to launch the editor — load-bearing crib sheet so future-you
+        // doesn't browse to the IP and find a bare JSON 404. The device
+        // does not host the editor; it only exposes the JSON API.
+        const int how_to_y = 285;
+        epd.drawFastHLine(60, how_to_y - 10, 800 - 120, GxEPD_BLACK);
+
+        epd.setTextSize(2);
+        epd.setCursor(60, how_to_y);
+        epd.print("To send images, run the editor on your laptop:");
+
+        epd.setCursor(80, how_to_y + 35);
+        epd.print("1. cd e:\\PDJ\\Github\\Electronic-Clapboard\\web");
+        epd.setCursor(80, how_to_y + 65);
+        epd.print("2. npm run dev");
+        epd.setCursor(80, how_to_y + 95);
+        epd.print("3. Open the Vite URL it prints (http://localhost:5173)");
+
         // Footer hint.
         epd.setTextSize(2);
-        epd.setCursor(60, 410);
-        epd.print("Send a frame from the editor to overwrite this screen.");
+        epd.setCursor(60, 445);
+        epd.print("Sending a frame will overwrite this screen.");
     } while (epd.nextPage());
 }
 
