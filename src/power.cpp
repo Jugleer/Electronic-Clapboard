@@ -125,11 +125,6 @@ void enter_sleep() {
     pinMode(PIN_SOLENOID_GATE, OUTPUT);
     digitalWrite(PIN_SOLENOID_GATE, LOW);
 
-    // Drop the EPD logic rail. The bistable display retains its image
-    // (whatever the user last sent, or the boot splash). On wake,
-    // display::begin() re-powers and re-inits the panel.
-    display::power_off();
-
     // Wait for the user to release the button before arming ext0.
     // Without this, a still-held button causes immediate wake (ext0
     // triggers on level LOW; if the line is already LOW when sleep
@@ -146,15 +141,22 @@ void enter_sleep() {
 
     // Phase 10: if the screensaver cycle is configured, arm the RTC
     // timer in addition to ext0 so the next deep-sleep ends at the
-    // next tick. screensaver::enter_timer_sleep() does the same
-    // gate-LOW + EPD-power-off + ext0 sequence below, plus the
-    // timer wakeup, then esp_deep_sleep_start. Does not return.
+    // next tick. screensaver::enter_timer_sleep() paints the first
+    // slate (panel still powered up — that's why we don't drop the
+    // EPD rail before this branch), then drops the rail itself
+    // before calling esp_deep_sleep_start(). Does not return.
     if (screensaver::should_arm_timer()) {
         clap_log("[power] sleeping; timer-wake in %u s, ext0 on GPIO %u",
                  (unsigned) screensaver::cycle_interval_s(),
                  (unsigned) PIN_WAKE_BUTTON);
         screensaver::enter_timer_sleep();
     }
+
+    // Plain ext0-only sleep path — no screensaver configured. Drop
+    // the EPD rail now (the panel retains its last drawn image
+    // bistably). Moved here so the screensaver branch above can
+    // paint with the panel still powered.
+    display::power_off();
 
     clap_log("[power] sleeping; wake on PIN_WAKE_BUTTON LOW (GPIO %u)",
              (unsigned) PIN_WAKE_BUTTON);
