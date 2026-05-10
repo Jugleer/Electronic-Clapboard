@@ -853,6 +853,43 @@ void tick_and_resleep() {
 }
 
 void enter_timer_sleep() {
+    // Paint the first slate immediately rather than make the user
+    // wait one full cycle interval (60 s minimum, 5 min default)
+    // before the screensaver visually begins. The state machine's
+    // `current_slot` was populated by the most recent apply_config()
+    // call (slot upload, delete, or config patch), so it already
+    // reflects "what would be painted on the first tick" — we don't
+    // call advance() here, leaving the round-robin counter alone so
+    // the first timer-wake correctly picks the *next* slot and the
+    // visual sequence stays in order: slot 0 → slot 1 → slot 2 → …
+    //
+    // The panel is already powered up from the awake session, so no
+    // display::begin() is needed. Two-pass full refresh matches the
+    // tick_and_resleep render path (white-pass first to absorb the
+    // deep-refresh post-cycle, then partial-content pass for full
+    // saturation — the same gotcha frame.cpp's deferred lockin
+    // works around).
+    auto slot_opt = g_sm.current_slot();
+    if (slot_opt.has_value()) {
+        const uint8_t slot = *slot_opt;
+        uint8_t* buf = static_cast<uint8_t*>(
+            heap_caps_malloc(FRAME_BYTES_EXPECTED, MALLOC_CAP_SPIRAM));
+        if (buf && read_slot(slot, buf)) {
+            const uint32_t white_ms = display::draw_full_white();
+            const uint32_t partial_ms = display::draw_partial_content(buf);
+            clap_log("[screensaver] paint-on-sleep slot %u "
+                     "(white=%u ms, partial=%u ms)",
+                     (unsigned) slot,
+                     (unsigned) white_ms,
+                     (unsigned) partial_ms);
+        } else {
+            clap_log("[screensaver] paint-on-sleep: slot %u read failed; "
+                     "panel keeps its current image",
+                     (unsigned) slot);
+        }
+        if (buf) heap_caps_free(buf);
+    }
+
     digitalWrite(PIN_LED_GATE, LOW);
     digitalWrite(PIN_SOLENOID_GATE, LOW);
     display::power_off();
