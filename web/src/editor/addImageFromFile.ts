@@ -6,11 +6,16 @@
  *
  * Phase 5 ships this as the threshold-only path; Phase 6 will add
  * Floyd-Steinberg dither without changing this entry-point.
+ *
+ * Phase 10 follow-up: callers can pre-select the binarisation
+ * algorithm via `options.algorithm`. The PropertiesPanel still lets
+ * the user fine-tune (or change) it after the element lands.
  */
 
 import { HEIGHT, WIDTH } from "../frameFormat";
 import { preloadImage, setCachedImageForTesting } from "./imageCache";
 import { useEditorStore } from "./store";
+import type { DitherAlgorithm } from "./types";
 
 const MAX_FRACTION = 0.6; // a fresh upload covers up to 60% of either axis
 
@@ -35,6 +40,9 @@ export interface AddImageOptions {
    *  top of it.
    */
   mode?: "fit" | "background";
+  /** Initial binarisation algorithm. Defaults to FS-dither. The user
+   *  can change it via PropertiesPanel after upload either way. */
+  algorithm?: DitherAlgorithm;
 }
 
 export async function addImageFromFile(
@@ -83,7 +91,12 @@ export async function addImageFromFile(
   }
 
   const store = useEditorStore.getState();
-  const id = store.addElement("image", position, { dataUrl, w, h });
+  const id = store.addElement("image", position, {
+    dataUrl,
+    w,
+    h,
+    algorithm: options.algorithm,
+  });
   if (mode === "background") {
     // Send to the bottom of the z-stack so any existing text/shapes
     // remain readable on top of the photo.

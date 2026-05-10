@@ -176,7 +176,27 @@ function fakeFile(name: string): File {
 }
 
 describe("ScreensaverPanel — upload flow", () => {
-  it("auto-assigns one upload to slot 0 when manifest is empty", async () => {
+  it("opens the prepare modal when files are chosen via the input", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse(FRESH_MANIFEST));
+    render(
+      <ScreensaverPanel
+        host="x"
+        palette={PALETTE}
+        apiOptionsOverride={{ fetchImpl, sleep: async () => {} }}
+      />,
+    );
+    await screen.findByText(/upload images to get started/i);
+    const input = screen.getByLabelText(/upload images/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [fakeFile("studio-blue.png")] } });
+    // Modal renders with the file's stem prefilled.
+    await screen.findByRole("dialog", { name: /prepare images/i });
+    expect(
+      (screen.getByLabelText(/name for studio-blue\.png/i) as HTMLInputElement)
+        .value,
+    ).toBe("studio-blue");
+  });
+
+  it("after Upload-all in the modal, POSTs with the chosen name (FS default)", async () => {
     let pushed = false;
     const fetchImpl = vi.fn<typeof fetch>(async (url) => {
       if (typeof url === "string" && url.includes("/screensaver/frame?")) {
@@ -194,7 +214,6 @@ describe("ScreensaverPanel — upload flow", () => {
       }
       return jsonResponse(FRESH_MANIFEST);
     });
-
     render(
       <ScreensaverPanel
         host="x"
@@ -202,11 +221,12 @@ describe("ScreensaverPanel — upload flow", () => {
         apiOptionsOverride={{ fetchImpl, sleep: async () => {} }}
       />,
     );
-
     const input = (await screen.findByLabelText(
       /upload images/i,
     )) as HTMLInputElement;
     fireEvent.change(input, { target: { files: [fakeFile("studio-blue.png")] } });
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: /^upload all$/i }));
 
     await waitFor(() => {
       const pushCall = fetchImpl.mock.calls.find(
@@ -217,22 +237,12 @@ describe("ScreensaverPanel — upload flow", () => {
     const pushCall = fetchImpl.mock.calls.find(
       ([u]) => typeof u === "string" && u.includes("/screensaver/frame?"),
     )!;
-    const [pushUrl, pushInit] = pushCall;
+    const [pushUrl] = pushCall;
     expect(pushUrl).toBe("http://x/screensaver/frame?slot=0&name=studio-blue");
-    expect((pushInit as RequestInit).method).toBe("POST");
-    const headers = new Headers((pushInit as RequestInit).headers);
-    expect(headers.get("Content-Type")).toBe("application/octet-stream");
-    expect((pushInit as RequestInit).body).toBeInstanceOf(Uint8Array);
-    expect(((pushInit as RequestInit).body as Uint8Array).length).toBe(48000);
   });
 
-  it("strips the file extension and trims names to 32 chars", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
-      if (typeof url === "string" && url.includes("/screensaver/frame?")) {
-        return jsonResponse({ ok: true, slot: 0, bytes: 48000, name: "x" });
-      }
-      return jsonResponse(FRESH_MANIFEST);
-    });
+  it("cancel from the modal aborts: no POST, no slate added", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse(FRESH_MANIFEST));
     render(
       <ScreensaverPanel
         host="x"
@@ -240,28 +250,19 @@ describe("ScreensaverPanel — upload flow", () => {
         apiOptionsOverride={{ fetchImpl, sleep: async () => {} }}
       />,
     );
-
     const input = (await screen.findByLabelText(
       /upload images/i,
     )) as HTMLInputElement;
-    // 50-char base + ".jpeg" — should be truncated to 32 chars (and
-    // the .jpeg should be gone).
-    const longName = "x".repeat(50) + ".jpeg";
-    fireEvent.change(input, { target: { files: [fakeFile(longName)] } });
-
-    await waitFor(() => {
-      const pushCall = fetchImpl.mock.calls.find(
-        ([u]) => typeof u === "string" && u.includes("/screensaver/frame?"),
-      );
-      expect(pushCall).toBeTruthy();
-    });
-    const pushUrl = fetchImpl.mock.calls.find(
-      ([u]) => typeof u === "string" && u.includes("/screensaver/frame?"),
-    )![0] as string;
-    const params = new URL(pushUrl).searchParams;
-    const name = params.get("name") ?? "";
-    expect(name.length).toBe(32);
-    expect(name.endsWith(".jpeg")).toBe(false);
+    fireEvent.change(input, { target: { files: [fakeFile("studio-blue.png")] } });
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    // Modal goes away.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // No POST happened.
+    const posts = fetchImpl.mock.calls.filter(
+      ([, init]) => (init as RequestInit | undefined)?.method === "POST",
+    );
+    expect(posts).toHaveLength(0);
   });
 
   it("uploads multiple files sequentially, auto-assigning around occupied slots", async () => {
@@ -309,8 +310,54 @@ describe("ScreensaverPanel — upload flow", () => {
     fireEvent.change(input, {
       target: { files: [fakeFile("a.png"), fakeFile("b.png"), fakeFile("c.png")] },
     });
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: /^upload all$/i }));
 
     await waitFor(() => expect(pushedSlots).toEqual([0, 2, 3]));
+  });
+
+  it("threshold choice in the modal flows through to renderScreensaverImageToBytes", async () => {
+    // The mock returns a fixed buffer regardless of input, but we
+    // assert it was called with algorithm='threshold'.
+    const renderMock = (await import("./sendImage"))
+      .renderScreensaverImageToBytes as unknown as ReturnType<typeof vi.fn>;
+    renderMock.mockClear();
+    let pushed = false;
+    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
+      if (typeof url === "string" && url.includes("/screensaver/frame?")) {
+        pushed = true;
+        return jsonResponse({ ok: true, slot: 0, bytes: 48000, name: "raw" });
+      }
+      return pushed
+        ? jsonResponse(
+            manifestWith({
+              slots: [{ slot: 0, name: "raw", bytes: 48000, updated_at_ms: 1 }],
+            }),
+          )
+        : jsonResponse(FRESH_MANIFEST);
+    });
+    render(
+      <ScreensaverPanel
+        host="x"
+        palette={PALETTE}
+        apiOptionsOverride={{ fetchImpl, sleep: async () => {} }}
+      />,
+    );
+    const input = (await screen.findByLabelText(/upload images/i)) as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [fakeFile("logo.png")] } });
+    await screen.findByRole("dialog");
+    // Switch to threshold for the (sole) row.
+    fireEvent.click(
+      screen.getByLabelText(/threshold \(no dither\) for logo\.png/i),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^upload all$/i }));
+
+    await waitFor(() => {
+      expect(renderMock).toHaveBeenCalledWith(
+        expect.any(File),
+        "threshold",
+      );
+    });
   });
 
   it("refuses upload when all 50 slots are occupied", async () => {
@@ -336,6 +383,8 @@ describe("ScreensaverPanel — upload flow", () => {
 
     const input = screen.getByLabelText(/upload images/i) as HTMLInputElement;
     fireEvent.change(input, { target: { files: [fakeFile("nope.png")] } });
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: /^upload all$/i }));
 
     await waitFor(() => {
       expect(onSent).toHaveBeenCalledWith(

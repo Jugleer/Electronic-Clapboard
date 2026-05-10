@@ -14,6 +14,7 @@ import { HEIGHT, WIDTH } from "../frameFormat";
 import { useGridStore } from "./gridStore";
 import {
   defaultsFor,
+  type DitherAlgorithm,
   type Element,
   type ElementId,
   type ElementType,
@@ -52,7 +53,13 @@ export interface EditorActions {
   addElement: (
     type: ElementType,
     position: { x: number; y: number },
-    options?: { src?: string; dataUrl?: string; w?: number; h?: number },
+    options?: {
+      src?: string;
+      dataUrl?: string;
+      w?: number;
+      h?: number;
+      algorithm?: DitherAlgorithm;
+    },
   ) => ElementId;
   /** Append a batch of pre-built elements (e.g. from a clipboard
    *  paste) and select them. Caller is responsible for fresh ids and

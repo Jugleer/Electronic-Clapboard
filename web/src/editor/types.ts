@@ -140,7 +140,13 @@ export function clampTextSize(n: number): TextSize {
 export function defaultsFor(
   type: ElementType,
   position: { x: number; y: number },
-  options: { src?: string; dataUrl?: string; w?: number; h?: number } = {},
+  options: {
+    src?: string;
+    dataUrl?: string;
+    w?: number;
+    h?: number;
+    algorithm?: DitherAlgorithm;
+  } = {},
 ): Element {
   const base = {
     id: "",
@@ -167,7 +173,7 @@ export function defaultsFor(
       w: options.w ?? DEFAULT_IMAGE_SIZE,
       h: options.h ?? DEFAULT_IMAGE_SIZE,
       dataUrl: options.dataUrl ?? "",
-      algorithm: DEFAULT_IMAGE_ALGORITHM,
+      algorithm: options.algorithm ?? DEFAULT_IMAGE_ALGORITHM,
       threshold: DEFAULT_IMAGE_THRESHOLD,
       brightness: DEFAULT_IMAGE_BRIGHTNESS,
       contrast: DEFAULT_IMAGE_CONTRAST,

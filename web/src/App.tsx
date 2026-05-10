@@ -10,6 +10,10 @@ import { PropertiesPanel } from "./editor/PropertiesPanel";
 import { rasterizeElements } from "./editor/renderToCanvas";
 import { useEditorStore } from "./editor/store";
 import { addImageFromFile } from "./editor/addImageFromFile";
+import {
+  ImagePrepareModal,
+  type ImagePrepareDecision,
+} from "./editor/ImagePrepareModal";
 import { AlignButtons } from "./editor/AlignButtons";
 import { GridControls } from "./editor/GridControls";
 import { GroupButtons } from "./editor/GroupButtons";
@@ -83,26 +87,43 @@ export function App() {
   );
   const effectiveFullRefresh = fullRefresh || hasImage;
 
+  // Picked-but-not-yet-added scene image. The prepare modal opens
+  // against this; on confirm we add the image to the editor with the
+  // chosen algorithm + name. Cancel clears the pending state.
+  const [pendingImage, setPendingImage] = useState<{
+    file: File;
+    mode: "fit" | "background";
+  } | null>(null);
+
   const onPickFile = (mode: "fit" | "background"): React.ChangeEventHandler<HTMLInputElement> =>
-    async (e) => {
+    (e) => {
       const file = e.target.files?.[0];
       e.target.value = "";
       if (!file) return;
-      try {
-        await addImageFromFile(file, { mode });
-        setImageError(null);
-      } catch (err) {
-        setImageError(err instanceof Error ? err.message : String(err));
-      }
+      setPendingImage({ file, mode });
     };
 
-  const onCanvasDrop: React.DragEventHandler<HTMLDivElement> = async (e) => {
+  const onCanvasDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
+    setPendingImage({ file, mode: "fit" });
+  };
+
+  const onPrepareConfirm = async (decisions: ImagePrepareDecision[]) => {
+    if (decisions.length === 0 || pendingImage === null) {
+      setPendingImage(null);
+      return;
+    }
+    const decision = decisions[0];
+    const mode = pendingImage.mode;
+    setPendingImage(null);
     try {
-      await addImageFromFile(file);
+      await addImageFromFile(decision.file, {
+        mode,
+        algorithm: decision.algorithm,
+      });
       setImageError(null);
     } catch (err) {
       setImageError(err instanceof Error ? err.message : String(err));
@@ -414,6 +435,15 @@ export function App() {
         </div>
       </section>
       <ShortcutOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
+      {pendingImage && (
+        <ImagePrepareModal
+          files={[pendingImage.file]}
+          palette={palette}
+          confirmLabel="Add to canvas"
+          onCancel={() => setPendingImage(null)}
+          onConfirm={(d) => void onPrepareConfirm(d)}
+        />
+      )}
     </main>
   );
 }

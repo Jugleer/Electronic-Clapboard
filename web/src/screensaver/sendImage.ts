@@ -1,6 +1,6 @@
 /**
- * Render a screensaver image URL onto an 800×480 canvas, dither it
- * with Floyd–Steinberg, and pack into 48 KB of 1bpp MSB-first wire
+ * Render a screensaver image URL onto an 800×480 canvas, binarise via
+ * the chosen algorithm, and pack into 48 KB of 1bpp MSB-first wire
  * bytes. Independent of the editor element pipeline — the screensaver
  * just streams pre-baked images.
  *
@@ -11,7 +11,8 @@
  * (write to a slot for the cycle).
  */
 
-import { floydSteinbergInPlace } from "../editor/dither";
+import { floydSteinbergInPlace, thresholdInPlace } from "../editor/dither";
+import type { DitherAlgorithm } from "../editor/types";
 import { HEIGHT, WIDTH } from "../frameFormat";
 import { packFrame } from "../packFrame";
 
@@ -31,9 +32,15 @@ function loadImage(url: string): Promise<HTMLImageElement> {
  * URL.createObjectURL so the dither pipeline can use the same
  * <img>-loading path it uses for bundled assets. The object URL is
  * revoked once the image has decoded.
+ *
+ * `algorithm` defaults to Floyd-Steinberg (matches Phase 6 image-
+ * element default). Pass `"threshold"` to do a 50% luminance cut with
+ * no diffusion — best for line art / logos / pre-prepared 1-bit
+ * scans where dithering would only add unwanted noise.
  */
 export async function renderScreensaverImageToBytes(
   source: string | Blob,
+  algorithm: DitherAlgorithm = "fs",
 ): Promise<Uint8Array> {
   const url =
     typeof source === "string" ? source : URL.createObjectURL(source);
@@ -62,9 +69,26 @@ export async function renderScreensaverImageToBytes(
   const dy = Math.round((HEIGHT - dh) / 2);
   ctx.drawImage(img, dx, dy, dw, dh);
 
-  const data = ctx.getImageData(0, 0, WIDTH, HEIGHT);
-  floydSteinbergInPlace(data, /*invert=*/ false);
-  ctx.putImageData(data, 0, 0);
+  return binarisePackCanvas(ctx, algorithm);
+}
 
+/**
+ * Binarise an 800×480 canvas's pixels via the chosen algorithm and
+ * pack to 1bpp MSB-first wire bytes. Exported so the algorithm-
+ * dispatch logic can be tested without wrangling jsdom image loading
+ * — the upstream `renderScreensaverImageToBytes` is just `loadImage`
+ * + drawImage onto the canvas this helper consumes.
+ */
+export function binarisePackCanvas(
+  ctx: CanvasRenderingContext2D,
+  algorithm: DitherAlgorithm,
+): Uint8Array {
+  const data = ctx.getImageData(0, 0, WIDTH, HEIGHT);
+  if (algorithm === "fs") {
+    floydSteinbergInPlace(data, /*invert=*/ false);
+  } else {
+    thresholdInPlace(data, /*threshold=*/ undefined, /*invert=*/ false);
+  }
+  ctx.putImageData(data, 0, 0);
   return packFrame(ctx.getImageData(0, 0, WIDTH, HEIGHT));
 }

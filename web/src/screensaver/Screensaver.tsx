@@ -20,6 +20,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  ImagePrepareModal,
+  type ImagePrepareDecision,
+} from "../editor/ImagePrepareModal";
 import type { Palette } from "../editor/themeStore";
 import {
   deleteSlate,
@@ -63,6 +67,10 @@ export function ScreensaverPanel({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState<{ slot: number; name: string } | null>(null);
+  // When non-null, the prepare modal is open against this batch. The
+  // user picks per-file algorithm + name, then onConfirm runs the
+  // sequential upload loop. Cancelling clears the batch.
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   // Local mirrors of the config so the user can edit before pushing.
   // Initialised lazily from the manifest on first load.
   const [intervalDraft, setIntervalDraft] = useState<number>(300);
@@ -129,18 +137,19 @@ export function ScreensaverPanel({
 
   // --- Upload images ------------------------------------------------------
 
-  // Sequentially upload each picked file to the lowest-numbered
-  // unoccupied slot. We refresh the manifest between pushes so the
+  // Sequentially upload each prepared file to the lowest-numbered
+  // unoccupied slot, using the per-file algorithm chosen in the
+  // prepare modal. We refresh the manifest between pushes so the
   // next assignment sees the slot we just filled. Stops early (and
   // reports) if all 50 slots are occupied.
-  const handleFiles = useCallback(
-    async (files: File[]) => {
-      if (files.length === 0) return;
+  const handleDecisions = useCallback(
+    async (decisions: ImagePrepareDecision[]) => {
+      if (decisions.length === 0) return;
       setBusy("upload images");
       let snapshot: Manifest | null = manifest ?? (await fetchFreshManifest());
       let uploaded = 0;
       try {
-        for (const file of files) {
+        for (const decision of decisions) {
           if (!snapshot) {
             onSent?.("upload images", false, "no manifest available");
             return;
@@ -158,27 +167,36 @@ export function ScreensaverPanel({
             );
             return;
           }
-          const name = niceNameFromFilename(file.name);
           let bytes: Uint8Array;
           try {
-            bytes = await renderScreensaverImageToBytes(file);
+            bytes = await renderScreensaverImageToBytes(
+              decision.file,
+              decision.algorithm,
+            );
           } catch (e) {
             onSent?.(
-              `upload ${file.name}`,
+              `upload ${decision.file.name}`,
               false,
               e instanceof Error ? e.message : String(e),
             );
             continue;
           }
-          const r = await pushSlate(bytes, { slot: target, name }, apiOpts);
+          const r = await pushSlate(
+            bytes,
+            { slot: target, name: decision.name },
+            apiOpts,
+          );
           if (r.ok) {
             uploaded++;
-            onSent?.(`upload ${file.name} → slot ${target}`, true);
+            onSent?.(
+              `upload ${decision.file.name} → slot ${target} (${decision.algorithm})`,
+              true,
+            );
             // Refresh so the next iteration sees the now-occupied slot.
             snapshot = await fetchFreshManifest();
           } else {
             onSent?.(
-              `upload ${file.name}`,
+              `upload ${decision.file.name}`,
               false,
               `${r.code}: ${r.error}`,
             );
@@ -197,10 +215,13 @@ export function ScreensaverPanel({
 
   const onUploadClick = () => fileInputRef.current?.click();
 
+  // File input change → open the prepare modal. The user picks per-
+  // file algorithm + name; on confirm we run the sequential upload
+  // pipeline above with their decisions.
   const onFileInputChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = "";  // allow re-selecting the same file later
-    void handleFiles(files);
+    if (files.length > 0) setPendingFiles(files);
   };
 
   // --- Rename / delete / config ------------------------------------------
@@ -544,26 +565,24 @@ export function ScreensaverPanel({
           {busy === "apply config" ? "applying…" : "apply"}
         </button>
       </div>
+
+      {pendingFiles.length > 0 && (
+        <ImagePrepareModal
+          files={pendingFiles}
+          palette={palette}
+          confirmLabel="Upload all"
+          onCancel={() => setPendingFiles([])}
+          onConfirm={(decisions) => {
+            setPendingFiles([]);
+            void handleDecisions(decisions);
+          }}
+        />
+      )}
     </section>
   );
 }
 
 // --- helpers ---------------------------------------------------------------
-
-function niceNameFromFilename(filename: string): string {
-  // Drop the trailing extension (everything after the last "."),
-  // collapse path separators a defensive sanitiser may have left in,
-  // then trim to MAX_NAME_CHARS so the wire-side ?name= constraint
-  // is always satisfied.
-  const lastSlash = Math.max(filename.lastIndexOf("/"), filename.lastIndexOf("\\"));
-  const tail = lastSlash >= 0 ? filename.slice(lastSlash + 1) : filename;
-  const dot = tail.lastIndexOf(".");
-  const stem = dot > 0 ? tail.slice(0, dot) : tail;
-  const trimmed = stem.trim();
-  if (trimmed.length === 0) return "slate";
-  if (trimmed.length <= MAX_NAME_CHARS) return trimmed;
-  return trimmed.slice(0, MAX_NAME_CHARS);
-}
 
 function parseIntSafe(s: string, fallback: number): number {
   const n = parseInt(s, 10);
