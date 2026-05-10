@@ -449,11 +449,20 @@ The cycle resumes when the user long-presses back to sleep.
 | Content-Type | `application/octet-stream` |
 | Content-Length | **must equal 48 000** exactly |
 | Body | Raw 1-bit packed bytes per §1 |
-| Query: `slot` | required, 0..49 |
-| Query: `name` | optional, URL-encoded, ≤ 32 chars (display name) |
+| Query: `slot` | required, integer, **must satisfy `0 <= slot <= 49`** |
+| Query: `name` | optional, URL-encoded, 1..32 chars (display name) |
 
-Idempotent overwrite. Atomic: a partial write doesn't corrupt the
-existing slot. On success returns `{ "ok": true, "slot": N, "bytes": 48000, "name": "..." }`.
+Idempotent overwrite — pushing to an already-occupied slot replaces
+the previous frame and (if `name` is present) its display name.
+Atomic: a partial write doesn't corrupt the existing slot.
+
+The slot index domain is fixed at `0..49`; the firmware does not
+auto-allocate or "find a free slot." Storage exhaustion is therefore
+**not** a wire-level failure mode — there is no `slot_full` slug.
+Out-of-range indices (`slot < 0` or `slot > 49`, including the
+hypothetical "51st" push) return `400 bad_slot`.
+
+On success returns `{ "ok": true, "slot": N, "bytes": 48000, "name": "..." }`.
 
 | Status | Meaning | Slug |
 |--------|---------|------|
@@ -465,16 +474,41 @@ existing slot. On success returns `{ "ok": true, "slot": N, "bytes": 48000, "nam
 
 Per §4, clients retry `503` with the same back-off as `/frame`.
 
+##### `POST /screensaver/rename?slot=<n>&name=<urlenc>`
+
+Metadata-only edit of an occupied slot's display name. Body MUST be
+empty (`Content-Length: 0`) — separating rename from the 48 KB
+`POST /screensaver/frame` write avoids re-uploading the frame just
+to change a label.
+
+| Field | Value |
+|-------|-------|
+| Method | `POST` |
+| Body | empty (`Content-Length: 0`) |
+| Query: `slot` | required, `0..49` |
+| Query: `name` | required, URL-encoded, 1..32 chars |
+
+Atomic manifest rewrite (tmp → rename); the slot's frame bytes are
+untouched. On success returns `{ "ok": true, "slot": N, "name": "..." }`.
+
+| Status | Meaning | Slug |
+|--------|---------|------|
+| `200` | Manifest updated | — |
+| `400` | Bad slot index or bad name length | `bad_slot`, `bad_name` |
+| `404` | Slot is not occupied | `slot_empty` |
+| `503` | A `/frame` or `/screensaver/*` write is already in flight | `busy` |
+
 ##### `DELETE /screensaver/frame?slot=<n>`
 
 | Field | Value |
 |-------|-------|
 | Method | `DELETE` |
-| Query: `slot` | required, 0..49 |
+| Query: `slot` | required, `0..49` |
 
 Removes the slot's file and its manifest entry, atomically. Returns
 `200` with the post-delete slot count, or `404` (`slot_empty`) if
-the slot wasn't populated.
+the slot wasn't populated. Out-of-range slot index returns
+`400 bad_slot`.
 
 ##### `POST /screensaver/config`
 
@@ -512,7 +546,12 @@ config so the editor can show the truth.
 #### Versioning note
 
 These endpoints are versioned alongside the rest of the protocol per
-§5. `/screensaver/manifest` may add fields without a major bump;
+§5. They first appear in `firmware_version >= 0.5.0`. Clients gating
+on the version field (the same way Phase 9 fields gate on `>= 0.4.0`)
+should hide screensaver UI entirely on older firmwares — the routes
+return `404 not_found` rather than the slugs in the tables above.
+
+`/screensaver/manifest` may add fields without a major bump;
 existing fields' types are stable. The `picker_mode` enum may be
 extended (e.g. a future `"shuffle"` mode); clients must tolerate
 unknown values gracefully (treat as `round_robin` for display).
@@ -543,6 +582,7 @@ means the headers are missing on a redirect or error path.
 | `POST /frame`               | 10 s           | Full refresh on this panel can take ~4 s.      |
 | `POST /screensaver/frame`   | 10 s           | LittleFS write of a 48 KB blob — typically <500 ms but the panel may be mid-paint on a wake-button wake. |
 | `POST /screensaver/config`  | 3 s            | Tiny body; no flash write of frame data.       |
+| `POST /screensaver/rename`  | 3 s            | Manifest rewrite only; frame bytes untouched.  |
 | `DELETE /screensaver/frame` | 3 s            | Manifest rewrite + file unlink.                |
 | Retry on `503`              | back off       | First retry at 500 ms, then 1 s, then give up. |
 | Retry on `5xx`              | once           | Don't hammer a wedged device.                  |

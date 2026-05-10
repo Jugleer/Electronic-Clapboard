@@ -66,6 +66,11 @@ web/coverage/
 # copyright until ~2042). Use the `personal-*` prefix to keep them local.
 web/src/assets/screensaver/personal-*
 
+# Phase 10 user uploads: imagery the user pushes through the editor's
+# "+ Upload images" affordance into the device's slate set. Same
+# redistribution concern as the personal-* pattern above — kept local.
+screensaver-images/
+
 # Claude Code — user-local settings (commands/ is shared)
 .claude/settings.local.json
 

@@ -9,6 +9,7 @@
 #include "config.h"
 #include "display.h"
 #include "power_state.h"
+#include "screensaver.h"
 
 namespace {
 
@@ -141,6 +142,18 @@ void enter_sleep() {
     }
     if (digitalRead(PIN_WAKE_BUTTON) == LOW) {
         clap_log("[power] WARN: button still held after 2 s; arming sleep anyway");
+    }
+
+    // Phase 10: if the screensaver cycle is configured, arm the RTC
+    // timer in addition to ext0 so the next deep-sleep ends at the
+    // next tick. screensaver::enter_timer_sleep() does the same
+    // gate-LOW + EPD-power-off + ext0 sequence below, plus the
+    // timer wakeup, then esp_deep_sleep_start. Does not return.
+    if (screensaver::should_arm_timer()) {
+        clap_log("[power] sleeping; timer-wake in %u s, ext0 on GPIO %u",
+                 (unsigned) screensaver::cycle_interval_s(),
+                 (unsigned) PIN_WAKE_BUTTON);
+        screensaver::enter_timer_sleep();
     }
 
     clap_log("[power] sleeping; wake on PIN_WAKE_BUTTON LOW (GPIO %u)",

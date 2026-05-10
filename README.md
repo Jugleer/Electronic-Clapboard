@@ -56,6 +56,10 @@ The VSCode PlatformIO extension works independently and doesn't need the venv â€
 
 The `platformio.ini` assumes the board enumerates on **COM5**. If yours is different, either change `upload_port` / `monitor_port` in `platformio.ini` or create a local `platformio_override.ini` (gitignored) that redefines them.
 
+### First flash on Phase 10 firmware will erase on-device data
+
+[Phase 10](docs/phased-build-plan.md) ships a custom partition table at [partitions/default_16MB.csv](partitions/default_16MB.csv) that renames the trailing data partition from `spiffs` to `slate_data` (LittleFS, 3.456 MB) for the screensaver slate set. The first flash with `firmware_version >= 0.5.0` lands the new table and reformats that partition â€” anything previously stored at offset `0xC90000` is lost. The change is one-way at flash time; subsequent flashes within Phase 10+ are non-destructive. Editor IndexedDB layouts live in the browser and are not affected.
+
 ### Native USB CDC
 
 This firmware uses the ESP32-S3's **native USB CDC** rather than the CP210x UART bridge on the DevKitC. That means:

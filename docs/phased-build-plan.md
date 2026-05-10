@@ -44,9 +44,10 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 | 7     | Layout save/load (IndexedDB; `/sync` deferred)        | ✅ done     | 2026-04-27 |
 | 8     | Sleep / wake architecture                             | ✅ done     | 2026-04-28 |
 | 9     | Sync mechanism — physical fire button                 | ✅ done     | 2026-04-28 |
-| 10    | Untethered screensaver cycling (timer-wake)           | 🔜 scoped   | —          |
+| 10    | Untethered screensaver cycling (timer-wake)           | ✅ done     | 2026-05-10 |
 
-**Firmware version:** `0.4.0` (Phase 9 added fire fields + fire path).
+**Firmware version:** `0.5.0` (Phase 10 added the screensaver slate-set,
+LittleFS partition, timer-wake cycle, wallclock anchoring).
 **Test totals:** 167 vitest cases across 14 files, 67 native Unity
 cases across 7 programs, both firmware envs build clean.
 **Bundle:** ~485 KB JS (152 KB gz) + 227 KB icon PNGs in
@@ -1562,7 +1563,7 @@ Bench results from 2026-04-28 + the architectural decisions worth remembering fo
 
 ---
 
-## Phase 10 — Untethered screensaver cycling 🔜 **scoped 2026-04-28**
+## Phase 10 — Untethered screensaver cycling ✅ **landed 2026-05-10**
 
 **Slice delivered:** The device stores up to 50 pre-rendered slates in flash and cycles through them on a configurable cadence (60 s – 7 d, default 5 min) without any external device connected. Wi-Fi stays off between ticks; only an RTC timer wakes the chip, paints the next slate, and drops back to deep-sleep. Picker mode is `round_robin` by default; opt-in `wallclock_hybrid` mode (D2-hybrid: same slate at the same wall-clock moment, multi-device synchronised) falls back to `round_robin` until NTP sync has anchored the wall clock at least once. Editor side: the Phase 8 screensaver panel rebuilds as a slate-set manager that pushes / renames / reorders / deletes slates on the device and tweaks the cycle interval — no live coordination from the editor is required for the cycle itself.
 
@@ -1624,14 +1625,14 @@ Builds on Phase 8 plumbing: `power::WakeReason::Timer` is already wired, and `ma
 
 ### Bench gates (run after firmware lands)
 
-- **Gate S1 — push slate, see it on next tick.** Editor-push a slate to slot 0 with the device awake. Long-press to sleep. Wait the cycle interval (set to 60 s for the test). Panel should paint the pushed slate; status LED stays dark; `ping clapboard.local` continues to fail (Wi-Fi off).
-- **Gate S2 — round-robin walks N slots in order.** Push 3 distinct slates (slot 0/1/2), enable, set interval to 60 s, sleep. Watch the panel cycle 0 → 1 → 2 → 0 → ... at 60 s cadence over ~5 minutes.
-- **Gate S3 — atomic write survives power cut.** Push a slate to slot 5. Mid-`POST /screensaver/frame` (large enough body that the LittleFS write is observable on the wire), pull power. Re-power. `GET /screensaver/manifest` shows slot 5 with the *previous* contents (or absent if it was never populated), never a torn frame. Re-push completes successfully.
-- **Gate S4 — wallclock-hybrid sync.** Configure `picker_mode: "wallclock_hybrid"`. Manifest reads `picker_mode_actual: "round_robin"` until the device has been wake-button-woken once with Wi-Fi reachable; after that, `picker_mode_actual: "wallclock_hybrid"` and `rtc_synced: true`. Across two devices on the same LAN with the same slot set + interval, both should paint the same slot at the same wall-clock minute.
-- **Gate S5 — current draw on a 5-min cycle.** Multimeter on the 3S pack across a full cycle. Average draw ≈ deep-sleep floor (~0.3 mA) plus the ~5-second tick burst (panel ~25 mA peak). Order of magnitude check, not a precise figure.
-- **Gate S6 — disabled cycle truly disables.** `POST /screensaver/config` with `enabled: false`. Long-press to sleep. Device must not auto-wake on the previous interval — only the wake button brings it up.
-- **Gate S7 — empty-cycle force-disable.** Delete every slot. Manifest shows `enabled: false` even if the user previously set it to true. The firmware refuses to arm the timer with nothing to render.
-- **Gate S8 — power-cycle drops wallclock anchor.** Configure wallclock-hybrid + push slates + sleep (so RTC anchor is live). Pull power for 30 seconds. Re-power. Manifest should read `rtc_synced: false` and `picker_mode_actual: "round_robin"` until the next wake-button wake re-syncs.
+- ✅ **Gate S1 — push slate, see it on next tick.** Editor-push a slate to slot 0 with the device awake. Long-press to sleep. Wait the cycle interval (set to 60 s for the test). Panel should paint the pushed slate; status LED stays dark; `ping clapboard.local` continues to fail (Wi-Fi off). Verified 2026-05-10.
+- ✅ **Gate S2 — round-robin walks N slots in order.** Push 3 distinct slates (slot 0/1/2), enable, set interval to 60 s, sleep. Watch the panel cycle 0 → 1 → 2 → 0 → ... at 60 s cadence over ~5 minutes. Verified 2026-05-10.
+- ✅ **Gate S3 — atomic write survives power cut.** Push a slate to slot 5. Mid-`POST /screensaver/frame` (large enough body that the LittleFS write is observable on the wire), pull power. Re-power. `GET /screensaver/manifest` shows slot 5 with the *previous* contents (or absent if it was never populated), never a torn frame. Re-push completes successfully. Verified 2026-05-10.
+- ⊘ **Gate S4 — wallclock-hybrid sync.** *Not applicable for this build:* the user only has, and only ever plans to have, one board. The `(unix_seconds / interval) mod N` math is exhaustively covered by `test_screensaver_state` native tests; the hardware part of this gate (cross-device synchronisation across the same LAN) cannot be exercised on a single board. Marked N/A 2026-05-10. If a future build adds a second board, run this then.
+- ⏳ **Gate S5 — current draw on a 5-min cycle.** Multimeter on the 3S pack across a full cycle. Average draw ≈ deep-sleep floor (~0.3 mA) plus the ~5-second tick burst (panel ~25 mA peak). Order of magnitude check, not a precise figure. *Deferred to a battery-life characterisation pass when a multimeter is inline; not gating Phase 10.*
+- ✅ **Gate S6 — disabled cycle truly disables.** `POST /screensaver/config` with `enabled: false`. Long-press to sleep. Device must not auto-wake on the previous interval — only the wake button brings it up. Verified 2026-05-10.
+- ⊘ **Gate S7 — empty-cycle force-disable.** Delete every slot. Manifest shows `enabled: false` even if the user previously set it to true. The firmware refuses to arm the timer with nothing to render. *Skipped on user direction 2026-05-10 — the path is exercised by `screensaver::tick_and_resleep()`'s "occupied=0 → ext0-only sleep" branch and by `state machine apply_config(empty)` in the native tests, both of which match this gate's intent.*
+- ⊘ **Gate S8 — power-cycle drops wallclock anchor.** Configure wallclock-hybrid + push slates + sleep (so RTC anchor is live). Pull power for 30 seconds. Re-power. Manifest should read `rtc_synced: false` and `picker_mode_actual: "round_robin"` until the next wake-button wake re-syncs. *Skipped on user direction 2026-05-10 — relevant only if S4 ships, which it doesn't on a single-board build.*
 
 ### Risks (already considered)
 
@@ -1655,7 +1656,88 @@ Phase 10 firmware + editor work begins after this protocol contract + plan land 
 
 ### Phase 10 implementation notes (read me before Phase 11+)
 
-Append on landing.
+1. **Partition table is now committed at [partitions/default_16MB.csv](../partitions/default_16MB.csv).**
+   We did NOT add a slate_data partition alongside the existing layout —
+   the stock `default_16MB.csv` from arduino-esp32 uses every byte of
+   the 16 MB flash (the trailing `spiffs` runs from `0xC90000` to
+   `0xFF0000`, immediately followed by `coredump`). With no slack to
+   carve from, the only way to fit a 2.4 MB slate_data without
+   shrinking active partitions (app0/app1/nvs/otadata/coredump) is to
+   repurpose the unused `spiffs` partition. The CSV renames it to
+   `slate_data` at the same offset and size; the SubType stays
+   `spiffs` so both the bundled arduino-esp32 LittleFS driver and
+   `lorol/LittleFS_esp32` mount it without a custom subtype lookup.
+   First flash with `firmware_version >= 0.5.0` formats that region
+   (`LittleFS.begin(formatOnFail=true, ..., partitionLabel="slate_data")`),
+   wiping anything that was there. README.md "Build & flash" carries
+   the user-facing callout.
+
+2. **No migration tool.** The user had no Phase-10 cycled-set work to
+   preserve when the slice landed. If a future power-user has slates
+   they want to keep across a re-flash, the path is to download the
+   manifest and per-slot bytes via `GET /screensaver/manifest` +
+   `GET /screensaver/frame?slot=N` (the GET is not in the v1
+   contract; an editor-side "export" affordance would be the cleanest
+   home if the demand ever materialises).
+
+3. **Wallclock anchor is the system clock itself.** No NVS-anchored
+   `{unix_seconds, millis_at_sync}` pair was needed: the ESP32's RTC
+   keeps ticking through deep-sleep timer wakes for as long as the
+   chip is powered, so once `configTime()` has set the system clock
+   on a wake-button awake session, `time(nullptr)` survives every
+   timer wake until the next power cycle. `wallclock::is_synced()`
+   is just `time(nullptr) > 1.7e9`. A full power cycle drops the RTC
+   and `is_synced()` returns false until the next wake-button wake
+   re-syncs SNTP — exactly the behaviour bench gate S8 verifies.
+
+4. **Slot rename is `POST /screensaver/rename?slot=N&name=...` (no body).**
+   Decided during scope confirmation — reusing `POST /screensaver/frame`
+   would have required a 48 KB body for a metadata-only edit, or an
+   ugly empty-body exception in the validator. Separate route is
+   cleaner, the rename body cost drops from 48 KB to ~50 B, and the
+   atomic manifest rewrite is identical regardless of caller.
+
+5. **No `slot_full` slug.** The slot index domain is `0..49` fixed;
+   pushing slot=50+ returns `400 bad_slot`. The 50-slot cap is
+   enforced by index range, not a free-list. protocol.md §2.6 prose
+   says this explicitly so a future reader doesn't go looking for a
+   slug that doesn't exist.
+
+6. **Single-flight render lock is local to screensaver.cpp.** Both
+   `/frame` (in frame.cpp) and `/screensaver/{frame,rename,delete,
+   config}` (in screensaver.cpp) serialise on a `volatile bool`
+   inside their own modules. ESPAsyncWebServer dispatches every
+   handler from the AsyncTCP task so concurrent execution is
+   structurally impossible; the flags only need to gate "another
+   request is mid-render" within the same task. We did not extract a
+   shared render_lock module — the duplication is two `volatile bool`
+   declarations and is honest about the boundary.
+
+7. **Manifest reconciliation tolerates torn writes.** On boot,
+   `reconcile_manifest_vs_disk()` walks the LittleFS directory and
+   re-builds the occupied set from `slot_<n>.bin` files of size
+   exactly 48000 bytes. Files of any other size (including 0) are
+   silently dropped and removed; the manifest's name field for
+   surviving slots is loaded by a hand-rolled scan rather than a
+   strict JSON parse, so a partially-written manifest doesn't strand
+   the screensaver — the next config write rebuilds it cleanly.
+
+8. **Cycle is paused for the duration of every wake-button awake
+   session** (`screensaver::begin()` calls `g_sm.pause()`). Editor
+   writes don't race a timer-wake. On long-press to sleep,
+   `power::enter_sleep()` checks `screensaver::should_arm_timer()`
+   and either calls `screensaver::enter_timer_sleep()` (timer + ext0)
+   or falls through to its existing ext0-only path. Resume happens
+   inside `tick_and_resleep()` (`g_sm.resume()`).
+
+9. **Bench gates resolved 2026-05-10.** S1, S2, S3, S6 verified on
+   hardware (S3 — atomic write power-cut — is the load-bearing one
+   and passed both test runs with different yank timings). S4 marked
+   N/A on a single-board build; the math is unit-tested. S7 and S8
+   skipped on user direction (S7 is covered by the empty-occupied
+   branches in screensaver_state + screensaver.cpp; S8 only matters
+   if S4 ships). S5 deferred to a future battery-life
+   characterisation pass when a multimeter is inline — not gating.
 
 ---
 

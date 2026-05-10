@@ -36,6 +36,27 @@ export function App() {
   const [imageError, setImageError] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [clipboardHint, setClipboardHint] = useState<string | null>(null);
+  // Screensaver panel is collapsed by default — uploads + slate
+  // management is its own task that doesn't need to share visual
+  // space with the editor's primary toolbar. localStorage keeps the
+  // user's choice across reloads so a power user who lives in the
+  // panel doesn't have to re-expand on every visit.
+  const [screensaverOpen, setScreensaverOpen] = useState<boolean>(() => {
+    if (typeof localStorage === "undefined") return false;
+    try { return localStorage.getItem("clapboard.screensaver.open") === "1"; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(
+        "clapboard.screensaver.open",
+        screensaverOpen ? "1" : "0",
+      );
+    } catch {
+      // Quota / private mode — best effort.
+    }
+  }, [screensaverOpen]);
   const { status, error, lastResult, send } = useFrameSink({ host });
   const deviceStatus = useDeviceStatus({ host });
   const elementCount = useEditorStore((s) => s.elements.length);
@@ -316,7 +337,27 @@ export function App() {
           <AlignButtons />
           <LayoutButtons />
           <GridControls />
-          <ScreensaverPanel host={host} palette={palette} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Button
+              size="sm"
+              onClick={() => setScreensaverOpen((v) => !v)}
+              title={
+                screensaverOpen
+                  ? "Hide the screensaver slate-set manager"
+                  : "Manage the slate set the device cycles through while asleep"
+              }
+            >
+              {screensaverOpen ? "▾ Screensaver" : "▸ Screensaver"}
+            </Button>
+            <span style={{ fontSize: 11, color: palette.textMuted }}>
+              {screensaverOpen
+                ? "(collapse)"
+                : "(images shown on the panel between awake sessions)"}
+            </span>
+          </div>
+          {screensaverOpen && (
+            <ScreensaverPanel host={host} palette={palette} />
+          )}
           {imageError ? (
             <div style={{ color: palette.statusError, fontSize: 12 }}>
               Image upload failed: {imageError}

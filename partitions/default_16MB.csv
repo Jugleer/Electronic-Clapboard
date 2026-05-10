@@ -1,0 +1,33 @@
+# Electronic Clapboard — 16 MB flash partition table (Phase 10+).
+#
+# Identical to arduino-esp32's stock default_16MB.csv except the trailing
+# `spiffs` data partition has been renamed to `slate_data`. The flash
+# region (offset 0xC90000, size 0x360000 = 3.456 MB) is unchanged and is
+# now formatted as LittleFS, holding the screensaver slate set:
+#
+#   /screensaver/manifest.json     atomically-rewritten metadata
+#   /screensaver/slot_<n>.bin      48 KB raw 1bpp frames, 0..49
+#
+# 50 × 48 000 B = 2.4 MB worst-case payload + LittleFS metadata; the
+# 3.456 MB region gives ~1 MB of slack.
+#
+# !! WARNING — first flash with this table erases all on-device data.
+# The previous stock layout used the same offset for SPIFFS, but SPIFFS
+# and LittleFS are different filesystems; the migration to LittleFS
+# invalidates whatever was there. Editor IndexedDB layouts are
+# unaffected (they live in the browser, not the device). See
+# README.md "Build & flash" + docs/phased-build-plan.md Phase 10
+# implementation notes.
+#
+# `slate_data` SubType stays `spiffs` because both the bundled
+# arduino-esp32 LittleFS driver and the lorol/LittleFS_esp32 library
+# mount any partition with subtype `spiffs`. Using a custom subtype
+# would require a custom partition lookup that we don't need.
+#
+# Name,     Type, SubType, Offset,  Size,    Flags
+nvs,        data, nvs,     0x9000,  0x5000,
+otadata,    data, ota,     0xe000,  0x2000,
+app0,       app,  ota_0,   0x10000, 0x640000,
+app1,       app,  ota_1,   0x650000,0x640000,
+slate_data, data, spiffs,  0xc90000,0x360000,
+coredump,   data, coredump,0xFF0000,0x10000,

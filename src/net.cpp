@@ -8,8 +8,10 @@
 #include "clap_log.h"
 #include "fire.h"
 #include "frame.h"
+#include "screensaver.h"
 #include "secrets.h"
 #include "status_json.h"
+#include "wallclock.h"
 
 #ifndef FIRMWARE_VERSION
 #define FIRMWARE_VERSION "0.0.0-dev"
@@ -83,6 +85,10 @@ void start_http_server() {
     // registered below.
     frame::register_routes(server);
 
+    // Phase 10: /screensaver/* routes live in the screensaver module.
+    // Same CORS policy applies (handled inside the module's helpers).
+    screensaver::register_routes(server);
+
     server.onNotFound([](AsyncWebServerRequest* request) {
         // CORS preflight to a path we don't yet serve — answer it cleanly
         // so the browser doesn't surface a misleading network error.
@@ -125,6 +131,11 @@ void on_connected() {
              WiFi.RSSI(),
              WIFI_SSID);
     start_mdns();
+    // Phase 10: kick SNTP every time we (re-)associate. configTime
+    // is idempotent and the actual sync is non-blocking. Only a
+    // wake-button wake reaches this code (timer-wakes never bring
+    // the radio up), so this is exactly when we want to anchor.
+    wallclock::sync_async();
 }
 
 void on_disconnected() {

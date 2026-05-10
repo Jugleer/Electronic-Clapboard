@@ -1,18 +1,19 @@
 /**
- * Render a screensaver image URL onto an 800×480 canvas, dither it with
- * Floyd–Steinberg, and POST the resulting frame. Independent of the
- * editor's element pipeline — the screensaver doesn't manipulate the
- * editor store, it just streams pre-baked images.
+ * Render a screensaver image URL onto an 800×480 canvas, dither it
+ * with Floyd–Steinberg, and pack into 48 KB of 1bpp MSB-first wire
+ * bytes. Independent of the editor element pipeline — the screensaver
+ * just streams pre-baked images.
  *
  * Fit mode is "contain" with white pillarbox/letterbox so non-16:10
- * masters don't get distorted. `?full=1` is forced because dithered
- * photo-like content always benefits from a clean post-saturation pass.
+ * masters don't get distorted. Phase 10: this used to also POST the
+ * bytes to /frame; now it returns bytes only — the caller decides
+ * whether to push to /frame (one-shot view) or /screensaver/frame
+ * (write to a slot for the cycle).
  */
 
 import { floydSteinbergInPlace } from "../editor/dither";
 import { HEIGHT, WIDTH } from "../frameFormat";
 import { packFrame } from "../packFrame";
-import { sendFrame, type SendResult } from "../sendFrame";
 
 function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -25,26 +26,33 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
-export async function sendScreensaverImage(
-  url: string,
-  host: string,
-): Promise<SendResult> {
-  const img = await loadImage(url);
+/**
+ * Accepts a Blob/File or a string URL. Blobs go through
+ * URL.createObjectURL so the dither pipeline can use the same
+ * <img>-loading path it uses for bundled assets. The object URL is
+ * revoked once the image has decoded.
+ */
+export async function renderScreensaverImageToBytes(
+  source: string | Blob,
+): Promise<Uint8Array> {
+  const url =
+    typeof source === "string" ? source : URL.createObjectURL(source);
+  const revokeWhenDone = typeof source !== "string";
+  const img = await loadImage(url).finally(() => {
+    if (revokeWhenDone) URL.revokeObjectURL(url);
+  });
 
   const canvas = document.createElement("canvas");
   canvas.width = WIDTH;
   canvas.height = HEIGHT;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) {
-    return { ok: false, code: "no_context", error: "no 2D context" };
+    throw new Error("no 2D context for screensaver render");
   }
 
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  // Contain-fit: scale so the larger axis matches the frame, the
-  // smaller axis gets pillarbox/letterbox white margins. Avoids
-  // distortion from non-16:10 masters (most Escher prints are squarer).
   const naturalW = img.naturalWidth || img.width || WIDTH;
   const naturalH = img.naturalHeight || img.height || HEIGHT;
   const scale = Math.min(WIDTH / naturalW, HEIGHT / naturalH);
@@ -58,6 +66,5 @@ export async function sendScreensaverImage(
   floydSteinbergInPlace(data, /*invert=*/ false);
   ctx.putImageData(data, 0, 0);
 
-  const bytes = packFrame(ctx.getImageData(0, 0, WIDTH, HEIGHT));
-  return sendFrame(bytes, { host, full: true });
+  return packFrame(ctx.getImageData(0, 0, WIDTH, HEIGHT));
 }

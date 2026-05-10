@@ -8,6 +8,7 @@
 #include "log_server.h"
 #include "net.h"
 #include "power.h"
+#include "screensaver.h"
 
 // Phase 2 firmware entry point. Phase 1 brought up Wi-Fi, mDNS, /status,
 // and the TCP log tail; Phase 2 adds the data plane: a 48 KB PSRAM frame
@@ -44,8 +45,17 @@ void setup() {
 
     // Phase 8: classify wake reason and turn the status LED on. Must run
     // before any other Arduino-side init that touches the panel or radio,
-    // because Phase 9's timer-wake path will short-circuit those entirely.
+    // because Phase 10's timer-wake path will short-circuit those entirely.
     power::begin();
+
+    // Phase 10: timer-wake = screensaver tick. Skip Wi-Fi, log-server,
+    // /frame route + boot splash entirely; just paint the next slate
+    // and drop back into deep sleep. Total awake time per tick ~5 s,
+    // dominated by the EPD full refresh.
+    if (power::wake_reason() == power::WakeReason::Timer) {
+        clap_log("[boot] timer-wake — screensaver tick path (no Wi-Fi)");
+        screensaver::tick_and_resleep();  // [[noreturn]]
+    }
 
     // Order matters: allocate the PSRAM buffer and bring the panel up
     // before any HTTP route can fire, so the first /frame request
@@ -62,6 +72,13 @@ void setup() {
     // enter_sleep() on long-press, so fire::service() never executes
     // during a sleep transition.
     fire::begin();
+
+    // Phase 10: mount LittleFS, reconcile manifest, load NVS-persisted
+    // config + counter. Must run BEFORE net::begin() so the routes the
+    // screensaver registers can read the manifest immediately. The
+    // cycle is paused-for-this-awake-session inside begin() so editor
+    // writes don't race a timer-wake.
+    screensaver::begin();
 
     net::begin();
     log_server::begin();
