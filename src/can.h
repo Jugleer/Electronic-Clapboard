@@ -28,8 +28,36 @@
 #include <cstdint>
 
 #include "can_frames.h"
+#include "mode_state.h"
 
 namespace can_link {
+
+// Hooks the slate installs so this module stays transport-only: it decodes
+// frames and drives the transaction machine, but never touches the panel.
+// Function pointers rather than an include, so the dependency stays one-way
+// — the transport does not get to reach into the compositor.
+//
+// All three run on the CAN RX task and MUST NOT block. `request_render`
+// queues work for loop() and returns the panel time of the PREVIOUS render,
+// which is what CLAP_ACK reports: waiting for the real figure would stall
+// time-sync reception for the whole 1.5-3.5 s refresh. The ack's render_ms
+// is therefore "how long this device takes", not "how long this exact
+// repaint took" — which is what the ROS2 action's timeout budget needs.
+struct SlateHooks {
+    bool     (*busy)();
+    // Cheap availability check for a CLAP_COMMIT's template_id. Must not
+    // touch the filesystem — a bitmask lookup. Returning false yields
+    // Outcome::NoTemplate rather than silently rendering the requested
+    // fields into whatever layout happened to be active, which would be a
+    // wrong slate that looks right.
+    bool     (*template_available)(uint8_t id);
+    uint16_t (*request_render)(uint8_t template_id);
+};
+
+void set_slate_hooks(const SlateHooks& hooks);
+
+// Report the template the slate is actually rendering, for CLAP_HEARTBEAT.
+void set_active_template(uint8_t id);
 
 // Snapshot for /status and diagnostics. Counters are cumulative since boot.
 struct Stats {
@@ -75,9 +103,24 @@ uint64_t wall_us();
 // what "synced" means.
 bool time_synced();
 
-// Current display mode per the protocol.md §8.5 truth table. Phase 17 wires
-// this to the screensaver; exposed now so Phase 13 can be bench-verified.
+// Current display mode per the protocol.md §8.5 truth table.
 bool should_show_scene();
+
+// Mode plus an edge flag, for the caller that runs entry actions on a
+// transition. Call once per loop tick; `changed` is true on the first call
+// so boot runs the entry actions once.
+mode_state::Tracker::Step mode_step();
+
+// Committed field values, NUL-terminated. Never null. Index 0..7.
+const char* field(uint8_t field_id);
+
+// Set a field outside the CAN path — the date autofill. Does not disturb
+// transaction state.
+void set_field(uint8_t field_id, const char* text);
+
+// Clear every committed field. Used on Scene entry so a new session starts
+// blank rather than showing the previous shoot's take number.
+void clear_fields();
 
 Stats stats();
 

@@ -28,6 +28,12 @@ namespace slate {
 // persists until something replaces it.
 constexpr uint8_t MAX_VALUE_CHARS = 32;
 
+// Which field the firmware autofills with the date on entering scene mode.
+// 0 matches the built-in template's top-left box and the FIELD_HINTS map in
+// the editor. A CAN value for this field overwrites the autofill, so ROS2
+// can override it if a shoot needs a different date on the slate.
+constexpr uint8_t DATE_FIELD_ID = 0;
+
 void begin();
 
 // Replace one field. Truncates at MAX_VALUE_CHARS. Does not render — the

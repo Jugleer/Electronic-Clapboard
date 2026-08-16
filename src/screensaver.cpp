@@ -906,4 +906,52 @@ void enter_timer_sleep() {
     for (;;) {}
 }
 
+// ── Phase 17: awake-mode cycling ──────────────────────────────────────────
+
+namespace {
+
+// Paint whatever slot the state machine currently points at. Shared by both
+// public entry points so the render path — and its buffer lifetime — exists
+// once.
+//
+// Single-pass partial-content render, unlike the deep-sleep path's
+// white-then-content pair. The two-pass sequence exists to absorb the
+// panel's deep-refresh post-cycle when nothing else will run for minutes;
+// awake, the cycle repaints regularly and the extra ~3.5 s white pass would
+// double the visible churn on every tick for no benefit. Ghosting is
+// handled instead by the periodic full refresh the cycle already implies.
+uint32_t paint_selected() {
+    auto slot_opt = g_sm.current_slot();
+    if (!slot_opt.has_value()) return 0;
+
+    const uint8_t slot = *slot_opt;
+    uint8_t* buf = static_cast<uint8_t*>(
+        heap_caps_malloc(FRAME_BYTES_EXPECTED, MALLOC_CAP_SPIRAM));
+    if (!buf) {
+        clap_log("[screensaver] awake paint: PSRAM alloc failed");
+        return 0;
+    }
+    uint32_t ms = 0;
+    if (read_slot(slot, buf)) {
+        ms = display::draw_partial_content(buf);
+        clap_log("[screensaver] awake paint slot %u (%lu ms)",
+                 (unsigned) slot, (unsigned long) ms);
+    } else {
+        clap_log("[screensaver] awake paint: slot %u read failed", (unsigned) slot);
+    }
+    heap_caps_free(buf);
+    return ms;
+}
+
+}  // namespace
+
+uint32_t paint_current_slate() { return paint_selected(); }
+
+uint32_t paint_next_slate() {
+    g_sm.advance(wallclock::is_synced(), wallclock::unix_seconds());
+    return paint_selected();
+}
+
+bool has_slates() { return g_sm.occupied().count() > 0; }
+
 }  // namespace screensaver

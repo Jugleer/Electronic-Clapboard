@@ -6,9 +6,10 @@
 #include <esp_timer.h>
 
 #include "clap_log.h"
+#include "clap_txn.h"
 #include "config.h"
 
-// Phase 13 TWAI transport. Module overview lives in can.h.
+// Phase 13 TWAI transport + Phase 16 field ingest. Overview lives in can.h.
 
 namespace {
 
@@ -78,6 +79,25 @@ uint32_t g_next_recovery_ms  = 0;
 // Owned by the fire path via report_fire(); mirrored into the heartbeat.
 volatile uint16_t g_fires_since_boot = 0;
 
+// Phase 16. Owned by the RX task; read by loop() through the accessors,
+// which is safe because loop() only ever reads a committed value and a
+// commit is a single memcpy per field under no concurrent write (the RX
+// task is the sole writer, and a half-copied 32-byte string renders as
+// truncated text for one frame at worst).
+clap_txn::Txn g_txn;
+
+can_link::SlateHooks g_hooks{};
+bool                 g_hooks_set = false;
+
+mode_state::Tracker g_mode;
+
+// Last render duration reported back in CLAP_ACK, in ms.
+volatile uint16_t g_last_render_ms = 0;
+
+// Snapshot of the active template id for the heartbeat.
+volatile uint8_t g_active_template = 0;
+volatile uint8_t g_last_error      = 0;
+
 uint64_t local_us() { return (uint64_t) esp_timer_get_time(); }
 
 // Age helper that saturates instead of wrapping. millis() rolls over every
@@ -115,17 +135,23 @@ void send_heartbeat() {
     // Phase 13 has no template store and no renderer yet, so state is Idle
     // and template_loaded is clear. Phases 16/17 replace this with the real
     // mode and transaction state.
-    hb.state              = can_frames::State::Idle;
-    hb.flags              = 0;
+    hb.state = (g_mode.mode() == mode_state::Mode::Scene)
+                   ? can_frames::State::Idle
+                   : can_frames::State::Screensaver;
+    hb.flags = 0;
     if (WiFi.status() == WL_CONNECTED) hb.flags |= can_frames::HB_FLAG_WIFI_UP;
     if (can_link::time_synced())       hb.flags |= can_frames::HB_FLAG_TIME_SYNCED;
     // No rail divider fitted (config.h CLAPBOARD_HAS_RAIL_ADC), so rail_mv
     // stays 0 and RAIL_OK stays clear. 0 is distinguishable from a real
     // reading, which is the point.
+    if (g_hooks_set && g_hooks.template_available &&
+        g_hooks.template_available(g_active_template)) {
+        hb.flags |= can_frames::HB_FLAG_TEMPLATE_LOADED;
+    }
     hb.fires_since_boot   = g_fires_since_boot;
     hb.rail_mv            = 0;
-    hb.active_template_id = 0;
-    hb.last_error         = 0;
+    hb.active_template_id = g_active_template;
+    hb.last_error         = g_last_error;
 
     uint8_t d[8];
     can_frames::encode_heartbeat(hb, d);
@@ -169,7 +195,74 @@ void handle_link(const twai_message_t& m) {
     g_last_link_ms = millis();
     if (changed) {
         clap_log("[can] CLAP_LINK: ROS2 %s", link.ros2_up ? "UP" : "DOWN");
+        if (!link.ros2_up) {
+            // Drop a half-arrived transaction. Without this, chunks staged
+            // before a link drop would silently complete against a commit
+            // sent after it came back — mixing two shots' data into one
+            // slate, which is the worst failure this device can have.
+            g_txn.abandon_staging();
+        }
     }
+}
+
+void send_ack(uint8_t txn_id, can_frames::Outcome outcome, uint16_t render_ms) {
+    can_frames::Ack a{};
+    a.txn_id    = txn_id;
+    a.outcome   = outcome;
+    a.state     = (g_mode.mode() == mode_state::Mode::Scene)
+                      ? can_frames::State::Idle
+                      : can_frames::State::Screensaver;
+    a.render_ms = render_ms;
+
+    uint8_t d[8];
+    can_frames::encode_ack(a, d);
+    tx(can_frames::ID_CLAP_ACK, d, 8);
+}
+
+void handle_field_chunk(const twai_message_t& m) {
+    can_frames::FieldChunk c{};
+    if (!can_frames::decode_field_chunk(m.data, m.data_length_code, c)) {
+        g_rx_dropped++;
+        return;
+    }
+    g_txn.add_chunk(c);
+}
+
+void handle_commit(const twai_message_t& m) {
+    can_frames::Commit cm{};
+    if (!can_frames::decode_commit(m.data, m.data_length_code, cm)) {
+        g_rx_dropped++;
+        return;
+    }
+
+    const bool busy = g_hooks_set && g_hooks.busy && g_hooks.busy();
+    const bool have_tpl =
+        (g_hooks_set && g_hooks.template_available)
+            ? g_hooks.template_available(cm.template_id)
+            : true;   // no hooks installed (bench/unit path): don't block
+
+    const clap_txn::CommitResult res = g_txn.commit(cm, busy, have_tpl);
+
+    uint16_t render_ms = g_last_render_ms;
+    if (res.apply && g_hooks_set && g_hooks.request_render) {
+        render_ms        = g_hooks.request_render(cm.template_id);
+        g_last_render_ms = render_ms;
+    }
+
+    if (res.outcome != can_frames::Outcome::Ok) {
+        g_last_error = (uint8_t) res.outcome;
+        clap_log("[can] txn %u rejected: outcome=0x%02X (mask=0x%02X staged=0x%02X)",
+                 (unsigned) cm.txn_id, (unsigned) res.outcome,
+                 (unsigned) cm.field_present_mask,
+                 (unsigned) g_txn.staged_mask());
+    } else if (res.apply) {
+        clap_log("[can] txn %u applied: changed=0x%02X",
+                 (unsigned) cm.txn_id, (unsigned) res.changed_mask);
+    } else {
+        clap_log("[can] txn %u replayed (idempotent)", (unsigned) cm.txn_id);
+    }
+
+    send_ack(cm.txn_id, res.outcome, render_ms);
 }
 
 void handle_frame(const twai_message_t& m) {
@@ -187,9 +280,10 @@ void handle_frame(const twai_message_t& m) {
             handle_link(m);
             break;
         case can_frames::ID_CLAP_FIELD:
+            handle_field_chunk(m);
+            break;
         case can_frames::ID_CLAP_COMMIT:
-            // Phase 16 consumes these. Counted as received so bench testing
-            // can confirm the downlink works before the reassembler exists.
+            handle_commit(m);
             break;
         default:
             // Anything else on this bus is not ours. With the clapboard as
@@ -283,6 +377,8 @@ void begin() {
     }
 
     g_driver_up = true;
+    g_txn.reset();
+    g_mode.reset();
 
     // Priority 2: above the Arduino loop task (1) so a 100 Hz broadcast is
     // never starved by a 3 s e-paper refresh, below the Wi-Fi/TCP stack.
@@ -352,16 +448,39 @@ bool time_synced() {
     return age_ms(g_last_sync_ms, true) <= TIME_ANCHOR_STALE_MS;
 }
 
-bool should_show_scene() {
-    // protocol.md §8.5, in priority order. Every failure path converges on
-    // "false" (screensaver) so that a screensaver on the panel is always a
-    // true statement about upstream health.
-    if (!g_link_seen) return false;                                  // boot default
-    if (!g_ros2_up)   return false;                                  // explicit DOWN
-    if (age_ms(g_last_link_ms, true) > LINK_STALE_MS) return false;  // bridge/cable dead
-    if (!time_synced()) return false;                                // 0x7DD backstop
-    return true;
+namespace {
+mode_state::Inputs mode_inputs() {
+    mode_state::Inputs in{};
+    in.link_seen     = g_link_seen;
+    in.ros2_up       = g_ros2_up;
+    in.ms_since_link = age_ms(g_last_link_ms, g_link_seen);
+    in.time_synced   = time_synced();
+    return in;
 }
+}  // namespace
+
+bool should_show_scene() {
+    return mode_state::resolve(mode_inputs()) == mode_state::Mode::Scene;
+}
+
+mode_state::Tracker::Step mode_step() {
+    return g_mode.update(mode_inputs());
+}
+
+void set_slate_hooks(const SlateHooks& hooks) {
+    g_hooks     = hooks;
+    g_hooks_set = true;
+}
+
+void set_active_template(uint8_t id) { g_active_template = id; }
+
+const char* field(uint8_t field_id) { return g_txn.value(field_id); }
+
+void set_field(uint8_t field_id, const char* text) {
+    g_txn.set_value(field_id, text);
+}
+
+void clear_fields() { g_txn.clear_values(); }
 
 Stats stats() {
     Stats s{};

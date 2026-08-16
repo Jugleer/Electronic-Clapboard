@@ -57,4 +57,27 @@ uint32_t cycle_interval_s();
 // esp_sleep_enable_timer_wakeup(cycle_interval_s * 1e6 µs).
 [[noreturn]] void enter_timer_sleep();
 
+// ── Phase 17: awake-mode cycling ──────────────────────────────────────────
+//
+// Deep sleep is retired on the CAN build (config.h CLAPBOARD_HAS_WAKE_BUTTON),
+// so the cycle no longer runs off RTC timer-wakes. It becomes a millis()
+// timer in loop(): the device is mains-powered, the panel holds its image
+// unpowered anyway, and TWAI cannot survive deep sleep — a sleeping node
+// stops ACKing and the bridge's TX presence gate closes against it.
+//
+// The 60 s minimum interval is RETAINED. It was never about battery life;
+// it is about not burning the panel's refresh budget.
+
+// Paint the currently-selected slate without advancing. Used on entry to
+// screensaver mode so the transition is immediate rather than waiting a
+// full cycle interval.
+uint32_t paint_current_slate();
+
+// Advance to the next slate and paint it. Called by the awake cycle timer.
+// Returns 0 when there is nothing to show (no occupied slots).
+uint32_t paint_next_slate();
+
+// True when there is at least one occupied slot to cycle through.
+bool has_slates();
+
 }  // namespace screensaver
