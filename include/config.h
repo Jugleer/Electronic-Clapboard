@@ -52,17 +52,35 @@ constexpr uint8_t  PIN_CAN_TX      = 17;
 constexpr uint8_t  PIN_CAN_RX      = 18;
 constexpr uint32_t CAN_BITRATE_BPS = 1000000;  // 1 Mbps — all Jugglebot nodes must agree
 
-// --- Rail / reservoir monitoring ---
-// Renamed in spirit from "battery monitoring": the clapboard is now mains-
-// adjacent, fed from the robot's shared 12 V harness. The ADC no longer
-// watches a discharging LiPo, it watches the flash reservoir cap recovering
-// after a fire (and, incidentally, the rail itself — with no current through
-// the charge resistor the cap node sits at rail voltage).
+// --- Rail monitoring: NOT FITTED on the v1-final build ---
+// The 3S-LiPo era had a 10k/3.3k divider on GPIO 1 so the firmware could
+// refuse to fire on a flat pack. There is no pack any more, and the reservoir
+// cap that briefly justified keeping the divider is also gone (see the
+// PIN_LED_GATE notes and docs/wiring-guide.md "Phase 6"). What remains — a
+// stiff 12 V supply that is either present or absent — is not something an
+// ADC tells you anything useful about: if the rail sags far enough to matter,
+// the ESP32 browns out before any threshold logic could run.
 //
-// IMPORTANT: tap the divider at the CAP node, not at the rail. The cap node
-// is what determines whether a flash can actually be delivered; the rail
-// tells you nothing about reservoir state.
+// The divider is therefore unpopulated and GPIO 1 is left unconnected. We
+// never read it, so a floating pin is harmless.
+//
+// Set to 1 and repopulate the divider if any of these show up:
+//   - unexplained resets you want to correlate against rail voltage
+//   - a need to refuse firing during a measured sag (e.g. the shared rail
+//     turns out to be softer than the bench PSU suggested)
+//   - CLAP_HEARTBEAT consumers wanting a real rail_mv instead of 0
+#define CLAPBOARD_HAS_RAIL_ADC 0
+
+#if CLAPBOARD_HAS_RAIL_ADC
 constexpr uint8_t PIN_VBATT_ADC = 1;
+// Divider 10k top / 2.2k bottom → ratio ≈ 0.1803. Chosen over the old
+// 10k/3.3k because that ratio put 12 V at 2.98 V on the pin, past the S3
+// ADC's well-calibrated ceiling of ~2.45 V — i.e. the gate read the least
+// linear part of the curve. 10k/2.2k puts 12.0 V at 2.16 V.
+constexpr float    VBATT_DIVIDER_RATIO = 2.2f / (10.0f + 2.2f);
+constexpr uint32_t RAIL_MIN_FIRE_MV    = 10500;
+constexpr uint32_t RAIL_CRITICAL_MV    = 9500;
+#endif
 
 // --- Sync timing ---
 // LED_PULSE_MS is the gate-HIGH window for one flash. It must be at least
@@ -71,8 +89,8 @@ constexpr uint8_t PIN_VBATT_ADC = 1;
 // 41.7 ms but a 180° shutter is only open for 20.8 ms of it, so a pulse
 // shorter than the frame period has a real chance of landing in the closed
 // window. 50 ms clears 24 fps with margin and is the shortest value that
-// does. Do NOT shorten this to make the flash brighter — brightness comes
-// from the reservoir cap (see FIRE_RAIL_* below), not from pulse width.
+// does. Do NOT shorten this to make the flash brighter — with the reservoir
+// cap gone, brightness is set by the LED's rail current, not pulse width.
 //
 // Pre-Phase-11 this was two constants (LED_PULSE_MS = 50 alongside
 // SOLENOID_PULSE_MS = 60, the latter being the one actually used as the
@@ -83,6 +101,39 @@ constexpr uint32_t LED_PULSE_MS      = 50;
 // after the pulse window regardless of main-loop state; this is the ceiling
 // that window may never exceed (static_assert in fire.cpp).
 constexpr uint32_t FIRE_MAX_PULSE_MS = 80;
+
+// --- BENCH MODE: hold-to-illuminate --------------------------------------
+// Set to 1 and the fire button becomes a plain hold switch: the LED gate
+// follows the debounced button level, ON while GPIO 14 reads LOW, OFF on
+// release. Set to 0 (the default) for the normal LED_PULSE_MS one-shot.
+//
+// This exists to measure steady-state current draw with the LED lit. It is
+// NOT shippable behaviour — a clapboard whose flash lasts as long as your
+// thumb does is useless for frame-accurate sync.
+//
+// Measured 2026-08-16 on the bench PSU with this mode enabled: LED steady
+// 0.35 A, peak 0.38 A with a concurrent full-screen refresh, at 12.0 V.
+// Against the 0.5 A harness ceiling that leaves ~0.12 A, comfortably more
+// than the ~0.05 A the CAN transceiver will add. This is the measurement
+// that retired the reservoir-cap architecture: direct rail drive fits the
+// budget, so the cap, the 27 Ω charge resistor and the inrush problem all
+// went away with it.
+//
+// What this suspends while enabled: CLAUDE.md's "flash pulse must have a
+// firmware-enforced maximum duration" assumes a pulsed load protected from
+// its own duty cycle. In hold mode the operator IS the duty cycle, and the
+// LED runs straight off the rail so it must be rated continuous anyway.
+// FIRE_HOLD_MAX_MS keeps the ISR backstop alive regardless, against a
+// shorted button or a wedged loop().
+#define CLAPBOARD_LED_HOLD_MODE 0
+
+// Backstop for hold mode: the hw_timer_t ISR forces the gate LOW after this
+// long even if the button still reads pressed. Generous enough that any real
+// measurement finishes first (a PSU reading settles in well under a second),
+// short enough that a shorted button or a hung loop() can't leave the LED on
+// indefinitely while you're away from the bench. Release and re-press to
+// re-arm; the event is logged loudly when it fires.
+constexpr uint32_t FIRE_HOLD_MAX_MS = 30000;
 
 // --- Rail thresholds (Jugglebot 12 V harness) ---
 // Divider: 10k top / 2.2k bottom → ratio 2.2/(10+2.2) ≈ 0.1803.
@@ -117,6 +168,18 @@ constexpr float FIRE_CAP_READY_FRACTION = 0.95f;
 // the S3 and is not a strapping pin. Recommended hardware: 6 mm tactile
 // switch with optional external 10k + 100nF RC if bounce is observed.
 constexpr uint8_t  PIN_WAKE_BUTTON = 2;
+
+// NOT FITTED on the v1-final build. With permanent 12 V there is no runtime
+// to conserve, the panel holds its image unpowered anyway, and deep sleep is
+// actively incompatible with CAN (TWAI stops, the node stops ACKing, and the
+// bridge's TX presence gate closes).
+//
+// Set to 0 and power::service() becomes a no-op. This matters more than it
+// looks: sleep entry is triggered by a long-press on GPIO 2, and with no
+// button fitted the ONLY wake source is gone too. A floating GPIO 2 reading
+// LOW for a second would sleep the device with nothing able to wake it short
+// of a power cycle. Leaving the path live buys nothing and risks that.
+#define CLAPBOARD_HAS_WAKE_BUTTON 0
 
 // --- Fire button (Phase 9) ---
 // Momentary, button-to-GND, internal pull-up. Pressed = LOW. Drives the

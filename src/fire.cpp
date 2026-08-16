@@ -4,6 +4,7 @@
 #include <esp_attr.h>
 #include <soc/gpio_struct.h>
 
+#include "can.h"
 #include "clap_log.h"
 #include "config.h"
 #include "fire_state.h"
@@ -48,14 +49,14 @@ power_state::ButtonTracker g_button;
 fire_state::StateMachine   g_sm;
 hw_timer_t*                g_pulse_timer = nullptr;
 
-// Cached rail-too-low state. v1: single-sample threshold, no smoothing.
-// RAIL_MIN_FIRE_MV (10500) sits 1000 mV above RAIL_CRITICAL_MV (9500),
-// which is wider than typical ADC noise on the divider — flapping
-// refusals around the threshold are not a realistic concern.
+// Cached rail-too-low state. Always false while CLAPBOARD_HAS_RAIL_ADC is 0
+// — the divider is unpopulated, so there is nothing to sample.
 //
-// Phase 12 adds the second gate (reservoir recovered to a fraction of the
-// observed idle rail baseline); this absolute floor stays as the "supply
-// is actually broken" check underneath it.
+// This must NOT fall back to reading the pin anyway. GPIO 1 is left floating
+// with the divider removed, and analogReadMilliVolts() on a floating pin
+// returns drifting noise that can cross any threshold you pick. The failure
+// mode would be a fire button that intermittently does nothing, which reads
+// as a wiring fault and is miserable to diagnose.
 bool g_low_battery = false;
 
 // Static guard: the hardware timer alarm window is the only thing
@@ -63,6 +64,13 @@ bool g_low_battery = false;
 // cap. Tighten this assertion if LED_PULSE_MS ever climbs.
 static_assert(LED_PULSE_MS <= FIRE_MAX_PULSE_MS,
               "LED_PULSE_MS must not exceed FIRE_MAX_PULSE_MS");
+
+#if CLAPBOARD_LED_HOLD_MODE
+// Tracks whether the gate is currently held up by hold mode, so we only
+// touch the GPIO and the backstop timer on edges rather than every tick.
+bool     g_hold_active     = false;
+uint32_t g_hold_started_ms = 0;
+#endif
 
 void IRAM_ATTR pulse_end_isr() {
     // Atomic: clear both gate bits in a single register store. Direct
@@ -74,16 +82,46 @@ void IRAM_ATTR pulse_end_isr() {
 }
 
 uint32_t sample_pack_mv() {
+#if CLAPBOARD_HAS_RAIL_ADC
     // analogReadMilliVolts() returns calibrated mV at the ADC pin. The
-    // 10k/3.3k divider scales pack_v down by VBATT_DIVIDER_RATIO; we
-    // multiply back to recover pack mV. analogReadMilliVolts already
-    // averages internally on Arduino-ESP32 v2.x, so a single call is
-    // sufficient for the threshold check.
+    // divider scales the rail down by VBATT_DIVIDER_RATIO; we multiply back
+    // to recover rail mV. analogReadMilliVolts already averages internally
+    // on Arduino-ESP32 v2.x, so a single call is sufficient.
     const uint32_t pin_mv = analogReadMilliVolts(PIN_VBATT_ADC);
     return (uint32_t) (pin_mv / VBATT_DIVIDER_RATIO);
+#else
+    // No divider fitted. Report 0 rather than a plausible-looking constant
+    // so /status and CLAP_HEARTBEAT consumers can tell "not measured" from
+    // "measured 12 V".
+    return 0;
+#endif
 }
 
-void start_pulse() {
+#if CLAPBOARD_LED_HOLD_MODE
+// Bench mode: raise the gate and arm the long backstop. Called on the
+// press edge only.
+void hold_begin() {
+    digitalWrite(PIN_LED_GATE, HIGH);
+    timerWrite(g_pulse_timer, 0);
+    timerAlarmWrite(g_pulse_timer,
+                    (uint64_t) FIRE_HOLD_MAX_MS * 1000,
+                    /*autoreload=*/false);
+    timerAlarmEnable(g_pulse_timer);
+}
+
+// Called on the release edge. Disarm the backstop first, then drop the
+// gate — the reverse order would leave a window where a backstop fire
+// races our own write.
+void hold_end() {
+    timerAlarmDisable(g_pulse_timer);
+    digitalWrite(PIN_LED_GATE, LOW);
+}
+#endif
+
+// [[maybe_unused]]: hold mode drives the gate directly and never calls this.
+// Kept compiled in both modes so flipping CLAPBOARD_LED_HOLD_MODE back to 0
+// is a one-line change with nothing else to restore.
+[[maybe_unused]] void start_pulse() {
     // Single emitter as of Phase 11. PIN_SOLENOID_GATE is deliberately
     // NOT raised — audio sync is a v2 feature (config.h documents why).
     // To re-add it, raise the solenoid gate on the line below this one:
@@ -124,11 +162,11 @@ void begin() {
     digitalWrite(PIN_LED_GATE,      LOW);
     digitalWrite(PIN_SOLENOID_GATE, LOW);
 
-    // ADC config for VBATT. 12-bit width across 0–~3.1 V at the pin
-    // (11 dB attenuation) — covers the full 0–4.2 V/cell × 3 cells
-    // post-divider range with comfortable headroom.
+#if CLAPBOARD_HAS_RAIL_ADC
+    // ADC config for the rail divider. 12-bit width at 11 dB attenuation.
     analogReadResolution(12);
     analogSetPinAttenuation(PIN_VBATT_ADC, ADC_11db);
+#endif
 
     // Hardware timer #0 is unclaimed elsewhere in this firmware. APB
     // clock is 80 MHz; divider 80 → 1 MHz tick (1 µs/tick). Edge-
@@ -140,23 +178,35 @@ void begin() {
     g_sm.reset();
     g_low_battery = false;
 
+#if CLAPBOARD_LED_HOLD_MODE
+    g_hold_active = false;
+    clap_log("[fire] armed in HOLD MODE (bench) — LED follows PIN_FIRE_BUTTON=%u, "
+             "backstop %lu ms. Set CLAPBOARD_LED_HOLD_MODE=0 for the %lu ms flash.",
+             (unsigned) PIN_FIRE_BUTTON,
+             (unsigned long) FIRE_HOLD_MAX_MS,
+             (unsigned long) LED_PULSE_MS);
+#else
     clap_log("[fire] armed; PIN_FIRE_BUTTON=%u min_gap=%lu ms pulse=%lu (cap %lu) ms",
              (unsigned) PIN_FIRE_BUTTON,
              (unsigned long) MIN_FIRE_GAP_MS,
              (unsigned long) LED_PULSE_MS,
              (unsigned long) FIRE_MAX_PULSE_MS);
+#endif
 }
 
 void service() {
     const uint32_t now = millis();
 
-    // Refresh the low-battery flag every tick. Cheap (~10 µs); the
-    // alternative of "sample only on press" risks accepting a press
-    // and then realising mid-pulse that the pack is gasping. Catching
-    // it before the press is a better UX (silent refusal) and matches
-    // the CLAUDE.md "check battery before every sync event" intent.
-    const uint32_t pack_mv = sample_pack_mv();
-    g_low_battery = (pack_mv < RAIL_MIN_FIRE_MV);
+    // Refresh the rail-low flag every tick. Cheap (~10 µs); the alternative
+    // of "sample only on press" risks accepting a press and then realising
+    // mid-pulse that the supply is gasping. Returns 0 with no divider
+    // fitted, in which case there is nothing to gate on.
+    const uint32_t rail_mv = sample_pack_mv();
+#if CLAPBOARD_HAS_RAIL_ADC
+    g_low_battery = (rail_mv < RAIL_MIN_FIRE_MV);
+#else
+    g_low_battery = false;
+#endif
 
     // Debounce the raw button level via the same ButtonTracker the
     // wake path uses. We only consume the debounced level here; the
@@ -166,16 +216,62 @@ void service() {
     g_button.sample(now, raw_pressed);
     const bool debounced = g_button.debounced_pressed();
 
+#if CLAPBOARD_LED_HOLD_MODE
+    // Bench mode: the gate simply follows the debounced button level. The
+    // fire_state machine is bypassed entirely — its whole job is pulse and
+    // cooldown semantics, neither of which applies to a hold switch, and
+    // running it here would refuse the second press of every pair.
+    //
+    // We still tick the state machine so fires_since_boot / last_fire_at_ms
+    // stay meaningful for /status, but we ignore its Action and drive the
+    // gate ourselves. Passing a 0 min_gap keeps it out of CoolDown so each
+    // press counts.
+    (void) g_sm.sample(now, debounced, /*low_battery=*/false,
+                       /*pulse_ms=*/0, /*min_gap_ms=*/0);
+
+    if (debounced && !g_hold_active) {
+        g_hold_active     = true;
+        g_hold_started_ms = now;
+        hold_begin();
+        clap_log("[fire] HOLD on at %lu ms (n=%lu)",
+                 (unsigned long) now,
+                 (unsigned long) g_sm.fires_since_boot());
+    } else if (!debounced && g_hold_active) {
+        g_hold_active = false;
+        hold_end();
+        clap_log("[fire] HOLD off at %lu ms (held %lu ms)",
+                 (unsigned long) now,
+                 (unsigned long) (now - g_hold_started_ms));
+    } else if (g_hold_active && (now - g_hold_started_ms) >= FIRE_HOLD_MAX_MS) {
+        // The ISR has already forced the gate LOW by now — this branch only
+        // mirrors that in software so we latch off and say so. We track the
+        // deadline rather than reading the pin back, because pinMode(OUTPUT)
+        // on the ESP32 disables the input buffer and digitalRead() on an
+        // output pin does not reliably reflect the pad level.
+        g_hold_active = false;
+        clap_log("[fire] HOLD backstop fired after %lu ms — gate forced LOW. "
+                 "Release and re-press to re-arm.",
+                 (unsigned long) FIRE_HOLD_MAX_MS);
+    }
+#else
     const fire_state::Action action = g_sm.sample(
         now, debounced, g_low_battery,
         LED_PULSE_MS, MIN_FIRE_GAP_MS);
     if (action == fire_state::Action::Fire) {
-        clap_log("[fire] FIRE at %lu ms (n=%lu pack=%lu mV)",
+        clap_log("[fire] FIRE at %lu ms (n=%lu rail=%lu mV)",
                  (unsigned long) now,
                  (unsigned long) g_sm.fires_since_boot(),
-                 (unsigned long) pack_mv);
+                 (unsigned long) rail_mv);
         start_pulse();
+        // Report AFTER raising the gate. The flash instant is what the sync
+        // record refers to, and CAN transmission can block up to
+        // TX_TIMEOUT_MS — doing it first would put that latency between the
+        // timestamp and the light, which is the one error this record
+        // exists to avoid.
+        can_link::report_fire(g_sm.fires_since_boot());
     }
+#endif
+    (void) rail_mv;
 }
 
 std::optional<uint32_t> last_fire_at_ms() {

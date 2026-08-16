@@ -609,8 +609,8 @@ Sanctioned combinations:
 | C | R | Flash energy (12 → 9.5 V) | Avg flash power | Recharge 4RC | Inrush | `MIN_FIRE_GAP_MS` |
 |---|---|---|---|---|---|---|
 | **10,000 µF** | **27 Ω 5 W** | **0.27 J** | **5.4 W** | **1.08 s** | **0.44 A** | **1500** ← start here |
-| 22,000 µF | 27 Ω 5 W | 0.59 J | 11.9 W | 2.38 s | 0.44 A | 3000 |
-| 22,000 µF | 12 Ω 5 W + soft-start P-FET | 0.59 J | 11.9 W | 1.06 s | set by soft-start | 1500 |
+| 22,000 µF | 27 Ω 5 W | 0.59 J | 11.8 W | 2.38 s | 0.44 A | 3000 |
+| 22,000 µF | 12 Ω 5 W + soft-start P-FET | 0.59 J | 11.8 W | 1.06 s | set by soft-start | 1500 |
 
 Start at row 1. 5 W of LED for 50 ms is a lot indoors, and it keeps the
 refractory period at the value the firmware already ships with. Only move to

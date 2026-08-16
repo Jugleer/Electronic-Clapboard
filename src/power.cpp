@@ -96,6 +96,7 @@ const char* wake_reason_name() {
 }
 
 void service() {
+#if CLAPBOARD_HAS_WAKE_BUTTON
     // Pull-up wiring: LOW means the user is pressing the button.
     const bool raw_pressed = (digitalRead(PIN_WAKE_BUTTON) == LOW);
     const auto event = g_button.sample(millis(), raw_pressed);
@@ -103,6 +104,13 @@ void service() {
         clap_log("[power] long-press detected; entering deep sleep");
         enter_sleep();  // [[noreturn]]
     }
+#else
+    // No wake button fitted (config.h). Deliberately inert rather than
+    // deleted: enter_sleep() is still reachable from a future caller, and
+    // Phase 17 is where the sleep machinery actually gets retired. What we
+    // must not do is leave the *only* sleep trigger armed when the *only*
+    // wake source has been unsoldered.
+#endif
 }
 
 void enter_sleep() {
