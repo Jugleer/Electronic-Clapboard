@@ -16,11 +16,16 @@
 //   1. service() debounces the button via the same ButtonTracker the
 //      wake path uses, samples VBATT_ADC, and feeds both into the
 //      pure fire_state state machine.
-//   2. On Action::Fire, start_pulse() drives PIN_LED_GATE +
-//      PIN_SOLENOID_GATE HIGH simultaneously and arms a one-shot
-//      hardware timer to fire SOLENOID_PULSE_MS later.
+//   2. On Action::Fire, start_pulse() drives PIN_LED_GATE HIGH and arms
+//      a one-shot hardware timer to fire LED_PULSE_MS later.
 //   3. The hw_timer_t ISR (pulse_end_isr) clears both gates LOW via a
 //      single GPIO register write — atomic and IRAM-safe.
+//
+// Phase 11 cut audio sync (see config.h PIN_SOLENOID_GATE). The solenoid
+// gate is still cleared by the ISR and still forced LOW at boot, but
+// nothing raises it. The state machine, the watchdog, and the gate-driver
+// contract are all unchanged — this module drives one emitter instead of
+// two, which is why fire_state.h needed no edit.
 //
 // CLAUDE.md non-negotiables this satisfies:
 //   - "Solenoid pulse must have a firmware-enforced maximum duration.
@@ -51,9 +56,9 @@ bool g_low_battery = false;
 
 // Static guard: the hardware timer alarm window is the only thing
 // gating how long the gates stay HIGH, so it must respect the safety
-// cap. Tighten this assertion if SOLENOID_PULSE_MS ever climbs.
-static_assert(SOLENOID_PULSE_MS <= SOLENOID_MAX_PULSE_MS,
-              "SOLENOID_PULSE_MS must not exceed SOLENOID_MAX_PULSE_MS");
+// cap. Tighten this assertion if LED_PULSE_MS ever climbs.
+static_assert(LED_PULSE_MS <= FIRE_MAX_PULSE_MS,
+              "LED_PULSE_MS must not exceed FIRE_MAX_PULSE_MS");
 
 void IRAM_ATTR pulse_end_isr() {
     // Atomic: clear both gate bits in a single register store. Direct
@@ -75,11 +80,12 @@ uint32_t sample_pack_mv() {
 }
 
 void start_pulse() {
-    // CLAUDE.md: simultaneous rise. Both writes on adjacent lines, no
-    // intervening work — the GPIO peripheral retires them within the
-    // same APB cycle on the ESP32-S3.
-    digitalWrite(PIN_LED_GATE,      HIGH);
-    digitalWrite(PIN_SOLENOID_GATE, HIGH);
+    // Single emitter as of Phase 11. PIN_SOLENOID_GATE is deliberately
+    // NOT raised — audio sync is a v2 feature (config.h documents why).
+    // To re-add it, raise the solenoid gate on the line below this one:
+    // the ISR already clears both gates, and the watchdog window already
+    // covers both, so no other change is needed.
+    digitalWrite(PIN_LED_GATE, HIGH);
 
     // Re-arm the one-shot. Reset the count to 0 and set the alarm
     // value in microseconds (timer tick = 1 µs given the divider in
@@ -87,7 +93,7 @@ void start_pulse() {
     // disabled until we re-enable it for the next pulse.
     timerWrite(g_pulse_timer, 0);
     timerAlarmWrite(g_pulse_timer,
-                    (uint64_t) SOLENOID_PULSE_MS * 1000,
+                    (uint64_t) LED_PULSE_MS * 1000,
                     /*autoreload=*/false);
     timerAlarmEnable(g_pulse_timer);
 }
@@ -105,6 +111,10 @@ void begin() {
     // already drove these LOW before any other init ran. Repeating
     // here means a future caller of fire::begin() (e.g. a hot-reload
     // path) doesn't have to know about the boot-time invariant.
+    // PIN_SOLENOID_GATE is claimed and forced LOW even though nothing
+    // raises it (Phase 11). An unclaimed pin floats; a floating gate on a
+    // populated MOSFET can latch the load on. Claiming it is the cheaper
+    // half of "MOSFET gate outputs must default LOW on boot".
     pinMode(PIN_LED_GATE,      OUTPUT);
     pinMode(PIN_SOLENOID_GATE, OUTPUT);
     digitalWrite(PIN_LED_GATE,      LOW);
@@ -129,8 +139,8 @@ void begin() {
     clap_log("[fire] armed; PIN_FIRE_BUTTON=%u min_gap=%lu ms pulse=%lu (cap %lu) ms",
              (unsigned) PIN_FIRE_BUTTON,
              (unsigned long) MIN_FIRE_GAP_MS,
-             (unsigned long) SOLENOID_PULSE_MS,
-             (unsigned long) SOLENOID_MAX_PULSE_MS);
+             (unsigned long) LED_PULSE_MS,
+             (unsigned long) FIRE_MAX_PULSE_MS);
 }
 
 void service() {
@@ -154,7 +164,7 @@ void service() {
 
     const fire_state::Action action = g_sm.sample(
         now, debounced, g_low_battery,
-        SOLENOID_PULSE_MS, MIN_FIRE_GAP_MS);
+        LED_PULSE_MS, MIN_FIRE_GAP_MS);
     if (action == fire_state::Action::Fire) {
         clap_log("[fire] FIRE at %lu ms (n=%lu pack=%lu mV)",
                  (unsigned long) now,

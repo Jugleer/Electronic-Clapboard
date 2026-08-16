@@ -14,8 +14,10 @@
 // Outputs:
 //   - Action::Fire is returned exactly once per accepted press. The
 //     caller is the authoritative gate-driver — it sees Fire and is
-//     responsible for raising the LED + solenoid gates simultaneously,
-//     scheduling the watchdog, and clearing them after pulse_ms.
+//     responsible for raising whichever emitter gates the build drives,
+//     scheduling the watchdog, and clearing them after pulse_ms. This
+//     file deliberately does not know how many emitters there are,
+//     which is why cutting audio sync in Phase 11 needed no edit here.
 //   - the same press during cooldown / low-battery returns Action::None
 //     (silently ignored — not queued).
 //
