@@ -102,6 +102,60 @@ std::string build_status_json(const StatusInputs& in) {
     append_key(out, "fire_ready", false);
     out += (in.fire_ready ? "true" : "false");
 
+    // Phase 13 CAN block. Nested rather than flat because it is a coherent
+    // subsystem snapshot and a client either cares about all of it or none.
+    append_key(out, "can", false);
+    if (in.can.has_value()) {
+        const CanStatus& c = *in.can;
+        out += '{';
+        append_key(out, "up", /*first=*/true);
+        out += "true";
+
+        append_key(out, "bus_off", false);
+        out += (c.bus_off ? "true" : "false");
+
+        append_key(out, "rx_frames", false);
+        append_uint(out, c.rx_frames);
+
+        append_key(out, "rx_dropped", false);
+        append_uint(out, c.rx_dropped);
+
+        append_key(out, "tx_frames", false);
+        append_uint(out, c.tx_frames);
+
+        append_key(out, "tx_errors", false);
+        append_uint(out, c.tx_errors);
+
+        append_key(out, "bus_off_events", false);
+        append_uint(out, c.bus_off_events);
+
+        append_key(out, "time_synced", false);
+        out += (c.time_synced ? "true" : "false");
+
+        append_key(out, "link_seen", false);
+        out += (c.link_seen ? "true" : "false");
+
+        append_key(out, "ros2_up", false);
+        out += (c.ros2_up ? "true" : "false");
+
+        // UINT32_MAX is the "never" sentinel. Serialise it as null so a
+        // client plotting these can't graph 4.29e9 as a real age.
+        append_key(out, "ms_since_link", false);
+        if (c.ms_since_link == UINT32_MAX) out += "null";
+        else append_uint(out, c.ms_since_link);
+
+        append_key(out, "ms_since_sync", false);
+        if (c.ms_since_sync == UINT32_MAX) out += "null";
+        else append_uint(out, c.ms_since_sync);
+
+        append_key(out, "show_scene", false);
+        out += (c.show_scene ? "true" : "false");
+
+        out += '}';
+    } else {
+        out += "null";
+    }
+
     out += '}';
     return out;
 }

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 
+#include "can.h"
 #include "clap_log.h"
 #include "config.h"
 #include "display.h"
@@ -73,6 +74,14 @@ void setup() {
     // during a sleep transition.
     fire::begin();
 
+    // Phase 13: TWAI link to the Jugglebot CAN3 drop. Starts heartbeating
+    // immediately and unconditionally — the bridge will not transmit to a
+    // bus where it has not seen a partner frame within 5 s, so we have to
+    // introduce ourselves first (protocol.md §8.1). Placed before
+    // net::begin() so the heartbeat is already running while Wi-Fi
+    // association blocks for up to 8 s in the boot-splash wait below.
+    can_link::begin();
+
     // Phase 10: mount LittleFS, reconcile manifest, load NVS-persisted
     // config + counter. Must run BEFORE net::begin() so the routes the
     // screensaver registers can read the manifest immediately. The
@@ -117,5 +126,9 @@ void loop() {
     // path is awake-only by virtue of loop() not running while asleep.
     power::service();
     fire::service();
+    // CAN RX runs on its own task (a 50 ms loop tick cannot keep up with a
+    // 100 Hz time-sync broadcast). This only pumps the periodic heartbeat
+    // and bus-off recovery, both of which tolerate the 50 ms granularity.
+    can_link::service();
     delay(50);
 }

@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 
+#include "can.h"
 #include "clap_log.h"
 #include "fire.h"
 #include "frame.h"
@@ -57,6 +58,27 @@ void handle_status(AsyncWebServerRequest* request) {
     in.last_fire_at_ms  = fire::last_fire_at_ms();
     in.fires_since_boot = fire::fires_since_boot();
     in.fire_ready       = fire::is_fire_ready();
+
+    // Phase 13: copy the CAN snapshot across the Arduino/pure-C++ seam.
+    // status_json.cpp links into [env:native] and must not see can.h, so
+    // net.cpp owns the translation.
+    const can_link::Stats cs = can_link::stats();
+    if (cs.driver_up) {
+        CanStatus c{};
+        c.bus_off        = cs.bus_off;
+        c.rx_frames      = cs.rx_frames;
+        c.rx_dropped     = cs.rx_dropped;
+        c.tx_frames      = cs.tx_frames;
+        c.tx_errors      = cs.tx_errors;
+        c.bus_off_events = cs.bus_off_events;
+        c.time_synced    = cs.time_synced;
+        c.link_seen      = cs.link_seen;
+        c.ros2_up        = cs.ros2_up;
+        c.ms_since_link  = cs.ms_since_link;
+        c.ms_since_sync  = cs.ms_since_sync;
+        c.show_scene     = can_link::should_show_scene();
+        in.can = c;
+    }
 
     const std::string body = build_status_json(in);
 
