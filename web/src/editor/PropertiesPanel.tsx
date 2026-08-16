@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 
+import { CanFieldControls } from "./CanFieldControls";
 import { ICON_CATEGORIES, ICON_REGISTRY } from "./icons/registry";
 import { useEditorStore } from "./store";
 import { type Palette, usePalette } from "./themeStore";
@@ -205,6 +206,7 @@ export function PropertiesPanel(): JSX.Element {
               I
             </button>
           </div>
+          <CanFieldControls element={element} />
         </div>
       ) : element.type === "image" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

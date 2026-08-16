@@ -7,6 +7,7 @@
 #include "fire.h"
 #include "framebuffer.h"
 #include "slate.h"
+#include "template_store.h"
 #include "text_render.h"
 #include "frame.h"
 #include "log_server.h"
@@ -73,10 +74,12 @@ void setup() {
     // lands mid-composite. Non-fatal if it fails; the editor path and the
     // fire button stay useful without a compositor, which is why this does
     // not panic the way frame::begin() does.
-    if (framebuffer::begin()) {
-        text_render::begin();
-        slate::begin();
-    }
+    //
+    // Fonts and the buffer need no filesystem, so they come up here.
+    // slate::begin() is deliberately NOT called yet — it adopts a stored
+    // template, and LittleFS is not mounted until screensaver::begin().
+    const bool compositor_up = framebuffer::begin();
+    if (compositor_up) text_render::begin();
 
     // Phase 9: fire button + LED/solenoid pulse path. begin() must run
     // AFTER hold_high_current_rails_low() (the gates are already LOW)
@@ -102,6 +105,14 @@ void setup() {
     // cycle is paused-for-this-awake-session inside begin() so editor
     // writes don't race a timer-wake.
     screensaver::begin();
+
+    // Phase 15: template store, then the slate. Both AFTER
+    // screensaver::begin() because that is what mounts LittleFS, and in this
+    // order because slate::begin() adopts stored template 0 at boot — so a
+    // reboot comes back with whatever was last authored instead of silently
+    // reverting to the built-in mid-shoot.
+    template_store::begin();
+    if (compositor_up) slate::begin();
 
     net::begin();
     log_server::begin();

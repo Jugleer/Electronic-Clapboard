@@ -8,6 +8,12 @@ import { preloadCategory } from "./editor/icons/loader";
 import { LayerPanel } from "./editor/LayerPanel";
 import { PropertiesPanel } from "./editor/PropertiesPanel";
 import { rasterizeElements } from "./editor/renderToCanvas";
+import {
+  MAX_TEMPLATES,
+  buildTemplateBody,
+  describeError,
+  sendTemplate,
+} from "./editor/templateExport";
 import { useEditorStore } from "./editor/store";
 import { addImageFromFile } from "./editor/addImageFromFile";
 import {
@@ -40,6 +46,8 @@ export function App() {
   const [imageError, setImageError] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
   const [clipboardHint, setClipboardHint] = useState<string | null>(null);
+  const [templateSlot, setTemplateSlot] = useState(0);
+  const [templateStatus, setTemplateStatus] = useState<string | null>(null);
   // Screensaver panel is collapsed by default — uploads + slate
   // management is its own task that doesn't need to share visual
   // space with the editor's primary toolbar. localStorage keeps the
@@ -161,6 +169,35 @@ export function App() {
     const elements = useEditorStore.getState().elements;
     const canvas = rasterizeElements(elements);
     void send(canvas, { full: effectiveFullRefresh });
+  };
+
+  // Phase 15: push the scene as a TEMPLATE rather than a frame. The
+  // difference is that CAN-marked text boxes export blank and their
+  // geometry ships as a region trailer, so the robot can fill them at
+  // runtime. Kept as a separate action from Send rather than a mode
+  // toggle: sending a template overwrites a device-side slot and adopts
+  // it immediately, which is not something to do by accident.
+  const onSendTemplate = async () => {
+    const elements = useEditorStore.getState().elements;
+    const built = buildTemplateBody(elements);
+    if (built.errors.length > 0) {
+      setTemplateStatus(built.errors.map(describeError).join(" "));
+      return;
+    }
+    if (built.regions.length === 0) {
+      setTemplateStatus(
+        "No CAN fields marked — this template would be a static slate. " +
+          "Tick “CAN field” on a text box first.",
+      );
+      return;
+    }
+    setTemplateStatus(`Uploading ${built.regions.length} fields…`);
+    const res = await sendTemplate(host, templateSlot, built.body);
+    setTemplateStatus(
+      res.ok
+        ? `Template ${templateSlot} stored (${built.regions.length} fields). Panel repainting…`
+        : `Upload failed (${res.status || "network"}): ${res.detail}`,
+    );
   };
 
   useKeyboardShortcuts(editingId === null && !helpOpen, onSend, {
@@ -286,6 +323,27 @@ export function App() {
           >
             {status === "sending" ? "Sending…" : "Send to clapboard"}
           </Button>
+          <label title="Which of the device's 8 template slots to overwrite">
+            slot{" "}
+            <select
+              value={templateSlot}
+              onChange={(e) => setTemplateSlot(Number(e.target.value))}
+            >
+              {Array.from({ length: MAX_TEMPLATES }, (_, i) => (
+                <option key={i} value={i}>
+                  {i}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button
+            size="lg"
+            onClick={() => void onSendTemplate()}
+            disabled={elementCount === 0}
+            title="Upload as a template: CAN-marked boxes export blank and the robot fills them at runtime"
+          >
+            Send template
+          </Button>
           <Button
             size="sm"
             onClick={toggleTheme}
@@ -294,6 +352,9 @@ export function App() {
             {themeMode === "dark" ? "☀ light" : "☾ dark"}
           </Button>
         </HStack>
+        {templateStatus ? (
+          <div style={{ fontSize: 12, marginTop: 4 }}>{templateStatus}</div>
+        ) : null}
       </section>
 
       {/* Status row: kept on its own line so it doesn't push the

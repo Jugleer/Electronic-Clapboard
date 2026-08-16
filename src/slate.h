@@ -42,9 +42,16 @@ void clear_fields();
 
 const char* field(uint8_t field_id);
 
-// The template currently being rendered into. Phase 15 replaces this with
-// one loaded from LittleFS; for now it is always the built-in default.
+// The template currently being rendered into — the built-in default until
+// one is loaded from LittleFS.
 const region::Template& active_template();
+uint8_t                 active_template_id();
+bool                    active_is_builtin();
+
+// Load a stored template and make it active, pulling its background raster
+// into PSRAM. Returns false if absent, corrupt, or PSRAM is exhausted; the
+// previously active template is left untouched in every failure case.
+bool select_template(uint8_t id);
 
 // Composite and push: blank the buffer, draw every field, hand the bytes to
 // the panel. Returns the panel render time in ms, or 0 if the compositor is

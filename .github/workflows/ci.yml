@@ -88,6 +88,19 @@ jobs:
       - name: Build firmware (${{ matrix.env }})
         run: pio run -e ${{ matrix.env }}
 
+      # The editor predicts CAN-field truncation using advance tables
+      # generated from the firmware's own GFX font headers. If the FONTS
+      # table in src/text_render.cpp changes and fontMetrics.ts isn't
+      # regenerated, the editor's preview silently starts lying about where
+      # text will cut — which is exactly the failure the generated table
+      # exists to prevent. Runs only on the net env because that is the one
+      # that vendors Adafruit GFX into .pio/libdeps.
+      - name: Verify editor font metrics are up to date
+        if: matrix.env == 'esp32s3-net'
+        run: |
+          python tools/export_gfx_metrics.py
+          git diff --exit-code -- web/src/editor/fontMetrics.ts
+
   # -----------------------------------------------------------------------
   # Frontend: typecheck + Vitest + production build, on the empty skeleton.
   # The Vitest oracle test reads web/src/__fixtures__/oracle_frame.bin and

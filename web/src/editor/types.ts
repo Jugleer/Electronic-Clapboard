@@ -47,7 +47,51 @@ export interface TextElement extends BaseElement {
   verticalAlign: VerticalAlign;
   bold: boolean;
   italic: boolean;
+
+  /**
+   * Phase 15. When set (0–7), this text box is a CAN-driven field rather
+   * than static artwork: the robot supplies its content at runtime over
+   * CAN3, and the template's exported background leaves the box BLANK.
+   *
+   * `text` is still meaningful when this is set — it becomes the design-time
+   * placeholder shown in the editor so the author can see roughly how much
+   * fits. It is deliberately not shipped to the device: baking placeholder
+   * text into the raster would leave "SCENE 99" burned behind every real
+   * value.
+   *
+   * Undefined means an ordinary static text element, which is why this is
+   * optional rather than `-1`-sentinelled — existing saved layouts load
+   * unchanged.
+   */
+  canFieldId?: CanFieldId;
+
+  /**
+   * Which embedded firmware font renders this field on the device. Only
+   * meaningful when `canFieldId` is set, because static text is rasterised
+   * in the browser with `fontFamily`/`fontSize` and never touches the
+   * firmware's font table.
+   *
+   * The editor cannot use `fontSize` for CAN fields: the device has a closed
+   * set of bitmap fonts (region.h FontId), not a scalable one, so an
+   * arbitrary px size has nothing to map onto.
+   */
+  canFontId?: CanFontId;
 }
+
+/** Field slots on the wire. protocol.md §8.3 — eight fields, ids 0–7. */
+export const CAN_FIELD_IDS = [0, 1, 2, 3, 4, 5, 6, 7] as const;
+export type CanFieldId = (typeof CAN_FIELD_IDS)[number];
+
+/** Max characters a CAN field value may carry. protocol.md §8.3. */
+export const CAN_FIELD_MAX_CHARS = 32;
+
+/**
+ * Mirrors `region::FontId` in src/region.h. The numeric values are ON THE
+ * WIRE (they travel in the template trailer and persist in device flash), so
+ * this list may be appended to but never reordered.
+ */
+export const CAN_FONT_IDS = [0, 1, 2, 3, 4, 5, 6, 7] as const;
+export type CanFontId = (typeof CAN_FONT_IDS)[number];
 
 export interface RectElement extends BaseElement {
   type: "rect";
