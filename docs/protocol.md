@@ -5,8 +5,22 @@ ESP32-S3 firmware (`src/`). Subsequent build phases must not silently violate
 it. If a change is genuinely needed, update this doc *first*, in the same PR
 as the code change, and bump the protocol version.
 
+As of Phase 13 there are **two** transports, with a clean split of duties:
+
+| Transport | Carries | Sections |
+|---|---|---|
+| **HTTP over Wi-Fi** | Authoring: full 48 KB frames, screensaver slates, templates + their field regions | §1–§6 |
+| **CAN on Jugglebot CAN3** | Runtime: per-take field values, mode control, fire timestamps, liveness | §8 |
+
+The division is deliberate. Authoring is bulk, interactive, and happens at a
+bench; runtime is a few hundred bytes per take on a bus shared with a robot.
+Pushing a 48 KB frame over CAN would be 6,000 frames — about 0.67 s of *100%*
+bus occupancy — against ~5 ms for a field update. **§8 is a cross-repository
+contract**: the other end lives in the Jugglebot repo, so changes there need
+the handoff procedure in [can-integration-handoff.md](can-integration-handoff.md).
+
 **Protocol version:** `v1`
-**Last reviewed:** Phase 0
+**Last reviewed:** Phase 13
 
 ---
 
@@ -615,11 +629,196 @@ the schema diverges from firmware semver.
   cycling (§2.6). Editor-side layout management still lives in
   browser IndexedDB; the device only stores the *rendered output* of
   the slates the user has explicitly pushed for cycling.
-- `POST /sync` (software-triggered fire). Button-only, see §2.3.
+- `POST /sync` (software-triggered fire). Button-only, see §2.3 and §8.6.
+- CAN-side authoring. Templates and slates only ever arrive over HTTP;
+  the bus carries field *values*, never bitmaps. See §8.
 
 ---
 
-## 7. Test obligations (referenced from the build plan)
+## 8. CAN wire contract (Jugglebot CAN3)
+
+> **Cross-repository contract.** The peer implementation lives in
+> `Jugglebot/ros_ws/src/jugglebot/Teensy_code_canbridge/` and
+> `Jugglebot/ros_ws/src/jugglebot/jugglebot/`. Neither side may change this
+> section unilaterally — see
+> [can-integration-handoff.md](can-integration-handoff.md).
+
+### 8.1 Physical and bus parameters
+
+| Property | Value |
+|---|---|
+| Bus | Jugglebot **CAN3** drop (the can-bridge's CAN3 *peripheral*, which since 2026-07-31 hosts the *cone* role) |
+| Bit rate | 1 Mbps, classic CAN 2.0B — **not** CAN FD |
+| ID format | 11-bit standard identifiers |
+| Clapboard node role | Sole peripheral on the segment; the catching cone and the clapboard are mutually exclusive by physical connection |
+| Termination | Exactly two 120 Ω, one at the bridge and one at the clapboard |
+
+**The clapboard must transmit unconditionally from boot, before it has heard
+anything.** The bridge gates every transmission on `partner_recent()` — it
+will not send a frame on a bus where no partner frame has arrived within
+`BUS_PARTNER_STALENESS_US` (5 s), because an un-ACKed transmission on a
+partner-less bus retransmits forever and pins the TX error counter at the
+error-passive threshold. A clapboard that waits to be spoken to first will
+never be spoken to.
+
+### 8.2 ID allocation
+
+Block `0x7E8`–`0x7EF`. Existing Jugglebot allocations stop at `0x7E1`
+(`catching_cone.HEARTBEAT`), with `0x7DD`/`0x7DE`/`0x7DF` being the
+time-sync, tilt, and traffic-report frames.
+
+| ID | Name | Dir | Rate | Purpose |
+|---|---|---|---|---|
+| `0x7DD` | `TIME_SYNC` | Bridge→Clap | 100 Hz | *Existing frame, consumed not defined here.* `<II` unix sec, usec |
+| `0x7E8` | `CLAP_FIELD` | J→C | on demand | One 7-byte chunk of one field's text |
+| `0x7E9` | `CLAP_COMMIT` | J→C | on demand | Close a transaction: template, field mask, CRC |
+| `0x7EA` | `CLAP_LINK` | Bridge→Clap | 2 Hz | ROS2 up/down — drives slate ↔ screensaver |
+| `0x7EB` | `CLAP_ACK` | C→J | per txn | Transaction outcome |
+| `0x7EC` | `CLAP_HEARTBEAT` | C→J | 10 Hz | Liveness + state. **Also what opens the bridge's TX gate.** |
+| `0x7ED` | `CLAP_FIRE_EVENT` | C→J | per fire | Wall-clock instant of an accepted flash |
+| `0x7EE`–`0x7EF` | reserved | — | — | Do not allocate without updating both repos |
+
+### 8.3 `CLAP_FIELD` (0x7E8) — J→C, 8 bytes
+
+```
+byte 0    field_id (bits 0-3, valid 0-7) | seq (bits 4-7, valid 0-4)
+byte 1-7  7 bytes of field text, NUL-padded
+```
+
+Fields are **0–7**, each up to **32 characters**. Five chunks (`seq` 0–4)
+carry 35 bytes, so a 32-char maximum guarantees at least three trailing NUL
+pad bytes — the receiver can always find the terminator without a length
+field. Text is ASCII; bytes ≥ 0x80 are replaced with `?` at render time
+rather than rejected, because a mangled glyph is a better failure than a
+dropped take label.
+
+Chunks may arrive in any order. A chunk for a field not named in the
+subsequent `CLAP_COMMIT` mask is discarded.
+
+### 8.4 `CLAP_COMMIT` (0x7E9) — J→C, 8 bytes
+
+```
+byte 0    template_id (0-15)
+byte 1    field_present_mask — bit N set = field N is part of this transaction
+byte 2    flags: bit0 = force full refresh (clears e-paper ghosting)
+byte 3    txn_id — rolls 0-255, echoed in CLAP_ACK
+byte 4-5  crc16 (LE) over the committed field payloads, see below
+byte 6-7  reserved, must be 0
+```
+
+CRC-16/CCITT-FALSE (poly `0x1021`, init `0xFFFF`, no reflection, no final
+XOR) — the same variant the Jetson↔Teensy UDP protocol already uses, so both
+sides reuse an existing implementation. It is computed over the concatenation
+of each present field's **32-byte NUL-padded** buffer, in ascending field_id
+order. Padding to a fixed width rather than hashing the trimmed strings makes
+the CRC independent of chunk arrival order.
+
+A commit naming a field for which no chunk arrived is a `INCOMPLETE`
+rejection. Fields **not** named in the mask retain their previous value —
+this is a patch, not a replace, so ROS2 can update just the take number
+without resending the scene description.
+
+### 8.5 `CLAP_LINK` (0x7EA) — Bridge→Clap, 8 bytes
+
+```
+byte 0    link_state: 0 = ROS2 DOWN, 1 = ROS2 UP
+byte 1-7  reserved, must be 0
+```
+
+Emitted at 2 Hz by the can-bridge, derived from its existing Jetson-heartbeat
+machinery (`LINK_LOST` after `LINK_LOST_MISSES` × `HEARTBEAT_HZ` = 500 ms).
+
+**Mode resolution on the clapboard**, in priority order:
+
+| Condition | Display |
+|---|---|
+| Boot, nothing heard yet | Screensaver — the safe default |
+| Last `CLAP_LINK` said UP, and one arrived within 3 s | Scene template |
+| Last `CLAP_LINK` said DOWN | Screensaver |
+| No `CLAP_LINK` for 3 s | Screensaver — bridge or cable is dead |
+| No `0x7DD` for 90 s | Screensaver — backstop |
+
+The two staleness rules exist because push alone has a blind spot. If the
+Teensy dies or the cable is pulled, no "ROS2 is down" message is ever sent,
+and a push-only design would leave the last scene frame on the panel
+indefinitely — displaying the *healthiest* state during the *severest*
+failure. Since the clapboard is meant to be readable as a health indicator,
+every failure path must converge on the screensaver. The `0x7DD` backstop is
+nearly free: the bridge suppresses that broadcast when its own Jetson anchor
+goes stale (`time_synced()` false after 90 s), so its absence is already a
+ROS2-liveness signal.
+
+### 8.6 `CLAP_ACK` (0x7EB) — C→J, 8 bytes
+
+```
+byte 0    txn_id echoed from CLAP_COMMIT
+byte 1    outcome
+byte 2    clapboard state (see 8.7)
+byte 3-4  render_ms (u16 LE) — measured panel time, 0 if not rendered
+byte 5-7  reserved
+```
+
+| Outcome | Value | Meaning |
+|---|---|---|
+| `OK` | 0x00 | Committed and painted |
+| `REJECTED` | 0x01 | Generic refusal |
+| `CRC_MISMATCH` | 0x02 | Reassembled payload failed the CRC |
+| `INCOMPLETE` | 0x03 | Mask named a field with missing chunks |
+| `BUSY` | 0x04 | A render was already in flight |
+| `NO_TEMPLATE` | 0x05 | `template_id` not present in flash |
+| `BAD_FIELD_ID` | 0x06 | A chunk carried `field_id` > 7 |
+
+`render_ms` is why this is an ack and not a fire-and-forget: an e-paper full
+refresh is 1.5–3.5 s, so the ROS2 action's duration is dominated entirely by
+the panel rather than the wire. The action should not report success until
+this frame arrives.
+
+### 8.7 `CLAP_HEARTBEAT` (0x7EC) — C→J, 8 bytes, 10 Hz
+
+```
+byte 0    state: 0=BOOT 1=IDLE 2=RENDERING 3=SCREENSAVER 4=ERROR
+byte 1    flags: bit0 fire_ready, bit1 template_loaded,
+                 bit2 wifi_up, bit3 rail_ok, bit4 time_synced
+byte 2-3  fires_since_boot (u16 LE)
+byte 4-5  rail_mv (u16 LE) — reservoir node, not the raw rail
+byte 6    active_template_id
+byte 7    last_error (last non-OK CLAP_ACK outcome, 0 if none)
+```
+
+10 Hz matches the existing cone-heartbeat convention and costs ~0.1% of the
+bus. It must run **unconditionally from boot** (see §8.1).
+
+### 8.8 `CLAP_FIRE_EVENT` (0x7ED) — C→J, 8 bytes, one per accepted flash
+
+```
+byte 0-5  wall-clock microseconds of the flash (48-bit LE)
+byte 6-7  fires_since_boot (u16 LE)
+```
+
+48 bits of microseconds covers ~8.9 years — ample, and it keeps the frame to
+one 8-byte payload with the sequence number alongside.
+
+The clapboard derives wall clock by slaving to `0x7DD`. If it has never
+received one, this frame is **not** emitted at all rather than being sent
+with a bogus timestamp: a missing sync record is recoverable in post, a wrong
+one silently corrupts an edit.
+
+This is the "accurate timestamping" core function. Note that ROS2 receives
+these **without being able to trigger the flash** — firing stays button-only
+per §2.3. The robot gets a complete log of every clap; it does not get to
+clap.
+
+### 8.9 Uplink routing (informational)
+
+Clapboard→Jetson frames need **no new can-bridge relay code**. The bridge
+already copies every frame received on that bus into an SPSC ring and
+forwards each verbatim to the Jetson as a `CONE_FRAME` UDP message. The
+Jetson-side handler must learn the `0x7E8`–`0x7EF` IDs, but the transport
+exists.
+
+---
+
+## 9. Test obligations (referenced from the build plan)
 
 - **Phase 0:** byte-for-byte parity between `tools/frame_format.py` and
   `web/src/frameFormat.ts` via committed fixture.
