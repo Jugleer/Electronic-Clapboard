@@ -5,6 +5,9 @@
 #include "config.h"
 #include "display.h"
 #include "fire.h"
+#include "framebuffer.h"
+#include "slate.h"
+#include "text_render.h"
 #include "frame.h"
 #include "log_server.h"
 #include "net.h"
@@ -63,6 +66,17 @@ void setup() {
     // arriving immediately after Wi-Fi associates can't race init.
     frame::begin();
     display::begin();
+
+    // Phase 14: the slate compositor — a second 48 KB PSRAM buffer plus the
+    // GFX font tables. Separate from frame::'s buffer on purpose: sharing
+    // would save 48 KB of 8 MB while creating a race where a /frame POST
+    // lands mid-composite. Non-fatal if it fails; the editor path and the
+    // fire button stay useful without a compositor, which is why this does
+    // not panic the way frame::begin() does.
+    if (framebuffer::begin()) {
+        text_render::begin();
+        slate::begin();
+    }
 
     // Phase 9: fire button + LED/solenoid pulse path. begin() must run
     // AFTER hold_high_current_rails_low() (the gates are already LOW)
@@ -130,5 +144,9 @@ void loop() {
     // 100 Hz time-sync broadcast). This only pumps the periodic heartbeat
     // and bus-off recovery, both of which tolerate the 50 ms granularity.
     can_link::service();
+    // Runs a queued /slate composite. Must be here rather than in the HTTP
+    // handler: the panel blocks for seconds and the handler runs on the
+    // AsyncTCP task.
+    slate::service();
     delay(50);
 }

@@ -11,6 +11,7 @@
 #include "frame.h"
 #include "screensaver.h"
 #include "secrets.h"
+#include "slate.h"
 #include "status_json.h"
 #include "wallclock.h"
 
@@ -110,6 +111,7 @@ void start_http_server() {
     // Phase 10: /screensaver/* routes live in the screensaver module.
     // Same CORS policy applies (handled inside the module's helpers).
     screensaver::register_routes(server);
+    slate::register_routes(server);
 
     server.onNotFound([](AsyncWebServerRequest* request) {
         // CORS preflight to a path we don't yet serve — answer it cleanly
