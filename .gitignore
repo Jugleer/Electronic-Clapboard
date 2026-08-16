@@ -78,3 +78,8 @@ screensaver-images/
 build/
 CMakeCache.txt
 CMakeFiles/
+
+# Adobe Illustrator sources — large binaries, exported assets are what the
+# build consumes. Repo-wide rather than scoped to scene/, so a stray .ai
+# anywhere gets caught.
+*.ai
