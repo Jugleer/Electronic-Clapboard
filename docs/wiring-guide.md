@@ -1,7 +1,19 @@
 # Wiring Guide — Electronic Clapboard (Breadboard Prototype)
 
 > **Power source for prototyping:** Bench PSU set to 12.0V, current-limited to 3A.
-> This stands in for the 3S LiPo during development.
+> This stands in for the robot harness during development.
+>
+> **Phases 1–5 below describe the original battery-powered, solenoid-equipped
+> build.** They are kept because the LED, e-paper and button wiring is
+> unchanged and the test procedures are still the right way to bring those
+> sub-circuits up. Two things in them are now superseded — read
+> [Phase 6](#phase-6-can-bus--robot-power-v1-final) before building:
+>
+> | Superseded | Replaced by |
+> |---|---|
+> | Phase 2's solenoid + flyback + 4700 µF | Nothing — audio sync cut in firmware Phase 11 |
+> | 3S LiPo, LVC module, balance alarm | Jugglebot 12 V harness, 0.5 A budget |
+> | 10 kΩ / 3.3 kΩ battery divider | 10 kΩ / 2.2 kΩ reservoir divider (ADC linearity) |
 
 ## General breadboard rules
 
@@ -11,15 +23,17 @@
 - Keep high-current paths (LED, solenoid) on one side of the breadboard and signal-level wiring (SPI to e-paper, ADC) on the other. This isn't just tidiness — ground bounce from the solenoid can glitch the SPI bus.
 - IRLZ44N pinout (facing the label, legs down): **Gate — Drain — Source**. Double-check this with your specific part's datasheet; some TO-220 FETs swap drain and source.
 
-## Pin map (cumulative, post-Phase-4)
+## Pin map (cumulative, post-Phase-6)
 
 The phases below build up these assignments incrementally. This is the consolidated view — keep it in sync with `include/config.h`.
 
 | Function           | GPIO | Direction | Notes                                                              |
 |--------------------|-----:|-----------|--------------------------------------------------------------------|
 | LED MOSFET gate    |    4 | OUT       | 220 Ω series + 100 kΩ pulldown to GND. LOW at boot.                |
-| Solenoid MOSFET gate | 5  | OUT       | Same idiom. Hardware-watchdog-enforced LOW after `SOLENOID_MAX_PULSE_MS`. |
-| Battery ADC        |    1 | IN (ADC)  | Through 10 kΩ / 3.3 kΩ divider; scales 12 V down to ~3 V.           |
+| Solenoid MOSFET gate | 5  | OUT       | **Reserved, never raised** (firmware Phase 11). Still claimed, still forced LOW at boot and by the pulse-end ISR, so a populated-but-unused MOSFET can't latch on. |
+| Reservoir ADC      |    1 | IN (ADC)  | Through 10 kΩ / 2.2 kΩ divider, tapped at the **cap node** (not the rail). ADC1_CH0. |
+| **CAN TX**         |   17 | OUT       | To transceiver `D`/`TXD`. Logic-level, **not** CANH.               |
+| **CAN RX**         |   18 | IN        | From transceiver `R`/`RXD`. Logic-level, **not** CANL.             |
 | EPD MOSI           |   11 | OUT       | SPI to Waveshare HAT.                                               |
 | EPD CLK            |   12 | OUT       | SPI to Waveshare HAT.                                               |
 | EPD CS             |   10 | OUT       | SPI chip select.                                                    |
@@ -27,13 +41,23 @@ The phases below build up these assignments incrementally. This is the consolida
 | EPD RST            |    8 | OUT       | Panel reset.                                                        |
 | EPD BUSY           |    7 | IN        | Refresh-in-progress signal.                                         |
 | EPD PWR            |    6 | OUT       | Panel power gate (HAT rev2.3+). HIGH = on.                          |
-| Wake button        |    2 | IN_PULLUP | Button-to-GND, pressed = LOW. RTC-IO capable for `ext0` deep-sleep wake. |
-| Fire button        |   14 | IN_PULLUP | Button-to-GND, pressed = LOW. RTC-IO capable.                       |
+| Wake button        |    2 | IN_PULLUP | Button-to-GND, pressed = LOW. (RTC-IO capability now moot — deep sleep retired in Phase 17.) |
+| Fire button        |   14 | IN_PULLUP | Button-to-GND, pressed = LOW.                                       |
 | Status LED         |   21 | OUT       | Through 330 Ω. HIGH = awake. (GPIO 13 was tried first but is the Arduino-ESP32 default SPI MISO; `SPI.begin()` clobbered the OUTPUT mode during display init.) |
-| USB D−             |   19 | —         | Reserved for native USB OTG (fallback keyboard host).               |
-| USB D+             |   20 | —         | Reserved for native USB OTG.                                        |
 
-Strapping pins (avoid loading at boot): GPIO 0, 3, 45, 46. None are used here.
+**Free after Phase 11/13:** GPIO 15, 16, 38–42, 47.
+
+**Not available on this board — do not plan around them:**
+
+| Pins | Why |
+|---|---|
+| 26–32 | SPI flash |
+| 33–37 | Octal PSRAM (N16R8 specifically — these *are* free on non-R8 parts) |
+| 43, 44 | UART0 to the USB-serial bridge |
+| 19, 20 | Native USB D−/D+. The build sets `ARDUINO_USB_CDC_ON_BOOT=1`, so these belong to the CDC console. The "USB OTG fallback keyboard" idea from the original spec was never compatible with that and is now dropped outright — the editor and the CAN link are the input paths. |
+| 48 | Onboard WS2812 RGB LED on the DevKitC-1 |
+| 0, 3, 45, 46 | Strapping pins — avoid loading at boot |
+| 13 | Technically free, but it is the Arduino-ESP32 default SPI MISO; `SPI.begin()` reclaims it during display init. Burned once already (see Status LED row). |
 
 ## Safety checklist before applying power
 
@@ -500,9 +524,198 @@ Once all four phases work independently, integrate them:
 
 1. Merge the test sketches into the real `src/main_net.cpp` with the network firmware
 2. Confirm the wake button puts the device to sleep on long-press and wakes it on single-press
-3. Confirm the fire button fires LED + solenoid simultaneously, with the 1.5 s minimum gap enforced and battery-low refusal
-4. Add battery voltage monitoring (use the PSU voltage through the divider — it'll read ~12V, which is in the 3S range)
-5. Test the full sync sequence: edit a slate in the browser → Send → display updates → press fire button → LED flashes + solenoid strikes → timestamp logged to Serial and visible in `GET /status`
+3. Confirm the fire button fires the LED, with the minimum gap enforced and rail-low refusal
+4. Add rail voltage monitoring (use the PSU voltage through the divider)
+5. Test the full sync sequence: edit a slate in the browser → Send → display updates → press fire button → LED flashes → timestamp logged to Serial and visible in `GET /status`
+
+---
+
+## Phase 6: CAN bus + robot power (v1 final)
+
+This is the build that ships. It replaces the battery with a drop off the
+Jugglebot 12 V harness and adds a CAN transceiver so the robot can drive the
+slate contents.
+
+### The governing constraint
+
+The 12 V harness is **shared with the Jetson and every other 5 V/12 V
+peripheral on the robot**. The clapboard's budget is **< 0.5 A at all times**,
+and "all times" includes the instant of plug-in and the instant of a flash.
+Every number below falls out of that one constraint.
+
+| Draw | Current @ 12 V |
+|---|---|
+| ESP32-S3 + buck (Wi-Fi associated, averaged) | ~0.08 A |
+| CAN transceiver | ~0.05 A |
+| E-paper during refresh (burst) | ~0.02 A |
+| **Baseline subtotal** | **~0.15 A** |
+| Available for reservoir recharge | **~0.30 A** |
+| Margin | ~0.05 A |
+
+The flash itself is **not** in that table, and that is the whole trick: it
+draws from a local reservoir cap, never from the rail directly. The rail only
+ever sees the recharge current, which a series resistor bounds.
+
+### Topology
+
+```
+  Jugglebot 4-wire harness
+  ┌─────────────────────────────────────────────┐
+  │  +12V ──┬── FUSE 1A ──┬── SCHOTTKY (revpol) │
+  │         │             │                     │
+  │  GND ───┼─────────────┼──── star point ●    │
+  │  CANH ──┼───┐         │                     │
+  │  CANL ──┼─┐ │         │                     │
+  └─────────┘ │ │         │
+              │ │         ├──── BRANCH A: logic
+              │ │         │     12V → buck → 5V → ESP32-S3 5V pin
+              │ │         │
+              │ │         └──── BRANCH B: flash
+              │ │               12V → 27Ω 5W → ● CAP NODE
+              │ │                              │
+              │ │                    ┌─────────┼──────────┐
+              │ │                    │         │          │
+              │ │              10000µF/25V  10kΩ/2.2kΩ   LED+
+              │ │                    │       divider      │
+              │ │                    │         │        LED−
+              │ │                   GND    → GPIO 1       │
+              │ │                                    IRLZ44N drain
+              │ │                                         │
+              │ │                                       source
+              │ │                                         │
+              │ │                                    ● star GND
+              │ │
+              │ └── CANL ─┐
+              └── CANH ─┐ │
+                        │ │
+                   SN65HVD230 breakout
+                   VCC 3V3 · GND · D→GPIO17 · R→GPIO18
+```
+
+**Branch A taps the rail *before* the 27 Ω resistor.** This is the single most
+important detail on the page: if the ESP32's buck sat behind the resistor, a
+flash would drag its input down with the cap and brown out the MCU mid-refresh.
+
+### Sizing the reservoir
+
+Three numbers move together and you cannot change one alone:
+
+- **Flash energy** `E = ½C(V₁² − V₂²)` — how bright, for a 50 ms pulse
+- **Recharge** `≈ 4RC` to 98% — sets `MIN_FIRE_GAP_MS`
+- **Plug-in inrush** `= V/R` — must respect the 0.5 A budget
+
+Sanctioned combinations:
+
+| C | R | Flash energy (12 → 9.5 V) | Avg flash power | Recharge 4RC | Inrush | `MIN_FIRE_GAP_MS` |
+|---|---|---|---|---|---|---|
+| **10,000 µF** | **27 Ω 5 W** | **0.27 J** | **5.4 W** | **1.08 s** | **0.44 A** | **1500** ← start here |
+| 22,000 µF | 27 Ω 5 W | 0.59 J | 11.9 W | 2.38 s | 0.44 A | 3000 |
+| 22,000 µF | 12 Ω 5 W + soft-start P-FET | 0.59 J | 11.9 W | 1.06 s | set by soft-start | 1500 |
+
+Start at row 1. 5 W of LED for 50 ms is a lot indoors, and it keeps the
+refractory period at the value the firmware already ships with. Only move to
+row 2 if the flash reads as too subtle on camera — and remember that row 2
+costs you a 3 s minimum between claps.
+
+Row 3 exists because row 2's real cost is *inrush*, not recharge: doubling the
+cap while keeping inrush legal forces R up, which forces the refractory up. A
+soft-start P-FET (P-MOSFET + 100 kΩ gate resistor + 10 µF gate cap + 10 V
+Zener across gate-source) ramps the cap at plug-in independently, freeing R to
+be small. Four extra parts to get a bright flash *and* a short refractory.
+
+> **The firmware cannot detect a mismatch here.** `MIN_FIRE_GAP_MS` in
+> `include/config.h` is a constant; if you fit a bigger cap and forget to
+> raise it, the firmware will happily fire into a half-charged reservoir and
+> the flash will be dim and inconsistent. The Phase 12 reservoir-voltage gate
+> makes that *safe* — it refuses the fire rather than delivering a bad one —
+> but it does not make it *silent*. Change them together.
+
+### About the LED module
+
+Many "12 V LED modules" contain an internal constant-current driver. Those
+misbehave here: as the cap droops from 12 V toward 9.5 V, the driver either
+drops out of regulation or fights to hold current, and you get an unpredictable
+flash profile. Prefer a **bare COB emitter with an explicit series
+current-set resistor** so the flash is a clean RC decay with a sharp leading
+edge — which is exactly what you want a camera to catch.
+
+Size the series resistor for peak current at full charge:
+`R_set = (12 V − Vf) / I_peak`. For a COB with Vf ≈ 9 V at 1.2 A, that is
+2.5 Ω, dissipating 3.6 W *during the pulse only* — 0.18 J per flash, so
+average dissipation at a 1.5 s cadence is 0.12 W. A 5 W part is ample.
+
+Thermally the emitter is easy: 5.4 W × 50 ms = 0.27 J per flash, worst case
+every 1.5 s → **0.18 W average**. A small heatsink is still worth fitting, but
+this duty cycle is nowhere near stressing a 10 W module.
+
+### CAN transceiver
+
+**Part:** SN65HVD230 breakout (the common blue "VP230" board). Native 3.3 V
+supply and logic, no level shifting, fine at 1 Mbps.
+
+| Transceiver pin | Connect to |
+|---|---|
+| `VCC` / `3V3` | ESP32 **3V3** (not 5 V — this part is a 3.3 V device) |
+| `GND` | Star ground |
+| `D` / `TXD` | GPIO **17** |
+| `R` / `RXD` | GPIO **18** |
+| `Rs` / `S` | GND (or leave to the breakout's onboard resistor — high-speed mode) |
+| `CANH` | Harness CANH |
+| `CANL` | Harness CANL |
+
+**Termination — check this, don't assume.** A CAN bus needs exactly **two**
+120 Ω terminators, one at each physical end. With the clapboard as the only
+peripheral on CAN3, the bus is bridge ↔ clapboard, so both ends are terminated
+and the clapboard's end is one of them. Most SN65HVD230 breakouts ship with a
+120 Ω resistor already fitted — verify with a multimeter across CANH/CANL with
+everything unpowered and unplugged: **you should read ~60 Ω** across the
+assembled bus (two 120 Ω in parallel). 120 Ω means one terminator is missing;
+40 Ω means someone fitted a third.
+
+### Grounding
+
+The flash pulls over an amp for 50 ms, and the CAN transceiver's signalling is
+referenced to the same ground. Star-ground at the harness connector so that
+flash return current and transceiver ground return do not share a conductor.
+This is the same ground-bounce concern that the old solenoid raised, at
+roughly a fifth the magnitude — CAN's own error handling would retransmit a
+corrupted frame anyway, but there is no reason to generate them.
+
+### What comes out of the build
+
+| Removed | Added |
+|---|---|
+| 3S LiPo | 12 V harness drop (4-wire: +12, GND, CANH, CANL) |
+| Low-voltage cutoff module | — (rail is the robot's problem now) |
+| LiPo balance-lead alarm | — |
+| 5 A fuse | 1 A fuse (tight, because the rail is shared) |
+| Solenoid + IRLZ44N + 1N5408 | — (audio sync is v2) |
+| 4700 µF solenoid decoupling | 10,000 µF / 25 V reservoir |
+| 10 kΩ / 3.3 kΩ divider | 10 kΩ / 2.2 kΩ divider at the cap node |
+| — | SN65HVD230 transceiver breakout |
+| — | 27 Ω 5 W wirewound charge resistor |
+| — | Schottky reverse-polarity diode (SS34 or similar) |
+
+### Safety checklist before first connection to the robot
+
+- [ ] **Bench-test the whole board on a current-limited PSU at 0.5 A first.** If it trips, find out why on the bench, not on the rail feeding the Jetson.
+- [ ] Fuse fitted and rated 1 A — verify before plugging into the harness
+- [ ] Reverse-polarity Schottky fitted, band toward the load
+- [ ] Reservoir cap polarity correct (they vent when reversed)
+- [ ] Reservoir cap voltage rating ≥ 25 V
+- [ ] Measure inrush: series ammeter at plug-in, confirm peak < 0.5 A
+- [ ] Confirm ~60 Ω across CANH/CANL on the assembled, unpowered bus
+- [ ] Confirm the buck's input taps the rail *before* the 27 Ω resistor
+- [ ] Confirm transceiver VCC is on 3V3, not 5 V
+- [ ] LED MOSFET gate still has its 100 kΩ pulldown
+- [ ] `MIN_FIRE_GAP_MS` in `include/config.h` matches the (C, R) row you built
+
+### Bring-up order
+
+1. Power the board from a **bench PSU at 12 V, limit 0.5 A** — harness disconnected. Confirm boot, Wi-Fi association, `GET /status`.
+2. Fire the button. Watch the reservoir on a scope at the cap node: expect a droop to ~9.5 V and an RC recovery inside ~1.1 s.
+3. Connect CANH/CANL to the harness with **12 V still from the bench PSU**. Confirm the clapboard's 10 Hz heartbeat appears on the bus and that `0x7DD` time-sync frames start arriving once the bridge's presence gate opens.
+4. Only then move the 12 V feed to the harness.
 
 ---
 
@@ -520,6 +733,13 @@ Once all four phases work independently, integrate them:
 | Serial monitor shows resets | Brownout — 3.3V rail sagging during solenoid/LED fire | Separate ground return paths; add 100µF cap on ESP 3V3 pin |
 | Wake / fire button reads as pressed continuously | Wired without `INPUT_PULLUP` or with an external pull-down by mistake | The convention is button-to-GND with internal pull-up; `pinMode(PIN, INPUT_PULLUP)` then read LOW = pressed |
 | Wake / fire button registers multiple presses per physical click | Bounce on a cheap tactile switch | Firmware debounce in `power.cpp` / `fire.cpp` should suppress this; if not, add the optional 10 kΩ + 100 nF RC across the button |
+| Plugging into the harness browns out the Jetson | Reservoir inrush — R too small, or a soft-start P-FET that isn't ramping | Measure inrush with a series ammeter on the bench. `V/R` must be < 0.5 A: 27 Ω gives 0.44 A at 12 V |
+| Flash is dim and inconsistent | Firing into a half-charged reservoir | `MIN_FIRE_GAP_MS` is shorter than 4RC for the cap you actually fitted. Recompute from the wiring-guide Phase 6 table |
+| Flash brightness varies with distance from the last e-paper refresh | The buck is behind the charge resistor | Branch A must tap the rail *before* the 27 Ω resistor |
+| No CAN frames received, and the bridge reports `tx_gated` climbing | The bridge's bus-partner presence gate is closed — it will not transmit until it sees a frame from us | The clapboard must heartbeat unconditionally at boot, regardless of whether it has heard anything. Check the heartbeat is running before blaming the bridge |
+| CAN errors under load, transceiver warm | Termination wrong | ~60 Ω across an assembled unpowered bus. 40 Ω means a third terminator is fitted somewhere |
+| CAN works on the bench, fails on the robot | Ground bounce from the flash, or a ground loop through the harness | Star-ground at the connector; flash return must not share a conductor with transceiver ground |
+| CAN silent, transceiver seems dead | `VCC` on 5 V | SN65HVD230 is a 3.3 V part — it must be on 3V3 |
 | Status LED stays dark with the device awake | LED in backwards or wrong-polarity wiring | Long leg = anode to GPIO 21 via 330 Ω; short leg = cathode to GND |
 | Fire button does nothing | Battery below `LOW_BATTERY_THRESHOLD_MV`, or last fire was less than `MIN_FIRE_GAP_MS` ago, or fire state machine is in a refusing state | Check `GET /status` for `fire_ready: false` reason; charge the pack or wait the cooldown |
 | Pressing fire while a frame is rendering does nothing | Render blocks `loop()` so the fire poll can't sample | Acceptable — not a bug. Don't sync mid-render anyway. |

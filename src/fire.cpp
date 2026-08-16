@@ -48,10 +48,14 @@ power_state::ButtonTracker g_button;
 fire_state::StateMachine   g_sm;
 hw_timer_t*                g_pulse_timer = nullptr;
 
-// Cached low-battery state. v1: single-sample threshold, no smoothing.
-// LOW_BATTERY_THRESHOLD_MV (10500) sits 600 mV above CRITICAL_BATTERY_MV
-// (9900), which is wider than typical ADC noise on the divider — flapping
+// Cached rail-too-low state. v1: single-sample threshold, no smoothing.
+// RAIL_MIN_FIRE_MV (10500) sits 1000 mV above RAIL_CRITICAL_MV (9500),
+// which is wider than typical ADC noise on the divider — flapping
 // refusals around the threshold are not a realistic concern.
+//
+// Phase 12 adds the second gate (reservoir recovered to a fraction of the
+// observed idle rail baseline); this absolute floor stays as the "supply
+// is actually broken" check underneath it.
 bool g_low_battery = false;
 
 // Static guard: the hardware timer alarm window is the only thing
@@ -152,7 +156,7 @@ void service() {
     // it before the press is a better UX (silent refusal) and matches
     // the CLAUDE.md "check battery before every sync event" intent.
     const uint32_t pack_mv = sample_pack_mv();
-    g_low_battery = (pack_mv < LOW_BATTERY_THRESHOLD_MV);
+    g_low_battery = (pack_mv < RAIL_MIN_FIRE_MV);
 
     // Debounce the raw button level via the same ButtonTracker the
     // wake path uses. We only consume the debounced level here; the
