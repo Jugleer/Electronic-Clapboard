@@ -55,8 +55,11 @@ The ESP32 is a dumb frame sink. The browser does all the rendering. The Vite dev
 
 **Firmware version:** `0.5.0` (Phase 10 added the screensaver slate-set,
 LittleFS partition, timer-wake cycle, wallclock anchoring).
-**Test totals:** 167 vitest cases across 14 files, 67 native Unity
-cases across 7 programs, both firmware envs build clean.
+**Test totals at end of Part I:** 167 vitest cases across 14 files, 67 native
+Unity cases across 7 programs, both firmware envs build clean.
+*(Current totals after Part II: 345 vitest across 23 files; 222 native
+`RUN_TEST` cases across 15 programs. Native counts are from the source, not
+from a run — `pio test -e native` needs a host compiler and CI is the gate.)*
 **Bundle:** ~485 KB JS (152 KB gz) + 227 KB icon PNGs in
 `web/public/icons/` (lazy-loaded by category at runtime; not
 bundled into the JS). CI now enforces a 600 KB JS bundle gate,
@@ -1275,7 +1278,7 @@ Firmware was untouched (`firmware_version` stays 0.2.3).
    — so a legacy layout's appearance doesn't shift on load; the user
    tuned threshold by hand in Phase 5 and we preserve it. Fresh
    `defaultsFor` uploads get FS. Two migration tests in
-   [layoutSlot.test.ts](../web/src/editor/layoutSlot.test.ts) cover
+   [layoutStore.test.ts](../web/src/editor/layoutStore.test.ts) cover
    both branches.
 
 #### Test totals after Phase 6
@@ -1421,7 +1424,7 @@ Firmware was untouched.
 
 - **vitest: 241 cases** across 18 files (23 layoutSchema, 22
   layoutStore, 8 layoutMigrate, 14 LayoutButtons; 14 retired with
-  layoutSlot.test.ts; 188 carried from Phase 6).
+  layoutStore.test.ts; 188 carried from Phase 6).
 - **Native Unity: 67 cases** unchanged (no firmware change).
 - New devDeps: `idb-keyval@6.2.2`, `fake-indexeddb@6.0.0`,
   `@testing-library/react@16.1.0`, `@testing-library/dom@10.4.0`.
@@ -1784,19 +1787,42 @@ itself. That is Phase 14, and it is the phase most likely to overrun.
 
 ### Phase status
 
-| Phase | Slice                                                | Status      | Landed     |
-| ----- | ---------------------------------------------------- | ----------- | ---------- |
-| 11    | Retire audio sync; single-emitter fire path          | ✅ done     | 2026-08-15 |
-| —     | v1-final electrical plan (CAN pins, reservoir, BOM)  | ✅ done     | 2026-08-16 |
-| 12    | Rail/reservoir gate on the fire path                 | ⬜ next     | —          |
-| 13    | TWAI driver + heartbeat + time-sync slave — **keystone** | ⬜      | —          |
-| 14    | On-device text rendering into template regions       | ⬜          | —          |
-| 15    | Template authoring in the editor + `POST /template`  | ⬜          | —          |
-| 16    | `CLAP_FIELD`/`COMMIT`/`ACK` ingest + composite render | ⬜         | —          |
-| 17    | Screensaver rework; deep sleep retired               | ⬜          | —          |
+| Phase | Slice                                                | Status | Landed | HW validated |
+| ----- | ---------------------------------------------------- | ------ | ---------- | --- |
+| 11    | Retire audio sync; single-emitter fire path          | ✅ | 2026-08-15 | ✅ |
+| —     | v1-final electrical plan (CAN pins, transceiver, BOM) | ✅ | 2026-08-16 | ✅ |
+| 12    | Direct-rail LED drive (reservoir/divider/wake button removed) | ✅ | 2026-08-16 | ✅ 0.35 A steady / 0.38 A peak |
+| 13    | TWAI driver + heartbeat + time-sync slave — **keystone** | ✅ | 2026-08-16 | ✅ |
+| 14    | On-device text rendering into template regions       | ✅ | 2026-08-16 | ✅ via `GET /slate` |
+| 14b   | Multi-line word wrap + region clip rect              | ✅ | 2026-08-16 | ⬜ |
+| 15    | Template authoring in the editor + `POST /template`  | ✅ | 2026-08-16 | ✅ |
+| 16    | `CLAP_FIELD`/`COMMIT`/`ACK` ingest                   | ✅ | 2026-08-16 | ⬜ |
+| 17    | Mode arbitration; deep sleep retired                 | ✅ | 2026-08-16 | ⬜ |
+
+**All code is landed; Phases 14b–17 are not yet hardware-validated.** Phases
+16 and 17 in particular have never seen a real CAN frame — the ingest path and
+mode arbitration both depend on `CLAP_LINK`, which does not exist on the
+bridge yet. [protocol.md §8.11](protocol.md) has bench-injection frames that
+exercise both without the Teensy.
 
 **Wire contract:** [protocol.md §8](protocol.md). **Peer-repo work:**
 [can-integration-handoff.md](can-integration-handoff.md).
+
+### Where the plan was wrong
+
+Kept deliberately, because the corrections are the useful part:
+
+- **Phase 12 inverted.** Planned as "add a reservoir-voltage gate"; a bench
+  measurement showed the reservoir bought 1.3× brightness for three parts and
+  an inrush problem, so the phase became a deletion of the cap, the charge
+  resistor and the divider.
+- **Phase 14 was over-estimated and Phase 15 under-estimated.** Rendering was
+  flagged as the phase most likely to overrun; it came in small because
+  `GFXcanvas1`'s layout already matched our wire format. Phase 15 grew a font
+  metrics generator that was not scoped at all, and needed it — see its notes.
+- **The editor/firmware font mismatch** flagged as a Phase 14 known gap turned
+  out to be load-bearing rather than cosmetic, and is what forced the
+  generator.
 
 ---
 
@@ -1835,283 +1861,272 @@ separate audio recorder — the flash alone is a complete sync source.
 
 ---
 
-## Phase 12 — Rail / reservoir gate on the fire path
+## Phase 12 — Direct-rail LED drive ✅ **landed 2026-08-16**
 
-### What lands
+**This phase shipped as the opposite of what it planned.** It was scoped as
+"add a reservoir-voltage gate to the fire path". Bench measurement retired
+the reservoir instead, so the phase became a deletion.
 
-- `LOW_BATTERY_THRESHOLD_MV` → `RAIL_MIN_FIRE_MV` semantics throughout: the
-  ADC watches a reservoir cap recovering, not a pack discharging. *(Constant
-  rename already landed with the electrical plan; this phase lands the logic.)*
-- A **second, adaptive gate** in `fire_state.h`: alongside the fixed
-  `MIN_FIRE_GAP_MS` timer, refuse to fire until the reservoir has recovered
-  to `FIRE_CAP_READY_FRACTION` (0.95) of an observed idle-rail baseline.
-- Baseline tracking in `fire.cpp`: a slow-moving estimate of the idle rail,
-  sampled only when no fire is in flight and no recharge is in progress.
-- `/status` gains `rail_mv`, `rail_baseline_mv`, `reservoir_ready`.
-- Unit tests in `test/test_fire_state/` for the two-gate interaction.
+### What landed
 
-### Why two gates rather than one
+- `CLAPBOARD_LED_HOLD_MODE`, a bench mode making the LED follow the fire
+  button, used to take the measurement below. Left in the tree at `0`.
+- Reservoir cap, 27 Ω charge resistor and rail divider **removed** from the
+  design. The LED draws straight from the 12 V harness.
+- `CLAPBOARD_HAS_RAIL_ADC 0` — the ADC path is compiled out.
+- `CLAPBOARD_HAS_WAKE_BUTTON 0` — `power::service()` is inert.
 
-They fail differently, and neither subsumes the other:
+### The measurement that decided it
 
-- The **timer** is deterministic and needs no sensor, but it is a constant
-  compiled against an assumed (C, R). Fit a bigger cap without editing
-  `config.h` and the timer silently lets you fire into a half-charged
-  reservoir — a dim, inconsistent flash, which for a sync device is worse
-  than no flash because it still *looks* like it worked.
-- The **voltage gate** adapts to whatever hardware is actually fitted, but it
-  depends on an ADC reading that could be wrong (divider mis-populated,
-  reference drift), and a stuck-high reading would disable the gate entirely.
+2026-08-16, 12.0 V bench PSU, hold-mode firmware: **LED steady 0.35 A, peak
+0.38 A** with a concurrent full-screen refresh. Against the 0.5 A shared-harness
+ceiling that leaves ~0.12 A, comfortably more than the ~0.05 A the CAN
+transceiver adds.
 
-Requiring both means a hardware/firmware mismatch degrades to "refuses to
-fire" rather than "fires badly", and an ADC fault degrades to "fires no
-faster than the timer allows".
+### Why the reservoir was not worth it
 
-### Why the gate is relative, not absolute
+It delivered 5.4 W against 4.2 W for direct drive — a 1.3× gain for a cap, a
+charge resistor and an inrush problem. A reservoir only pays when peak far
+exceeds the average budget, and here **inrush blocks exploiting the 3.3% duty
+cycle**: a genuinely bright 20 W flash needs `R ≥ 27 Ω` to keep plug-in legal,
+hence ~32 mF, hence a 3.4 s refractory. The 0.5 A ceiling and the duty-cycle
+advantage are in direct conflict, and the ceiling wins.
 
-A fixed threshold has to assume a rail voltage. Set it at 11.4 V and a
-legitimately-11.5 V supply is permanently one noise sample from lockout; set
-it at 10.8 V and a 12.5 V supply waves through a cap that is 400 mV short.
-Tracking a baseline and requiring 95% of it is correct on any supply in
-range. `RAIL_MIN_FIRE_MV` remains underneath as the absolute "the harness
-itself is broken" floor.
+### Phase 12 implementation notes (read me before Phase 13+)
 
-### Acceptance tests
-
-1. Native: fire accepted at `t=0`; rejected at `t=MIN_FIRE_GAP_MS-1` even
-   with the reservoir reported full; rejected at `t=MIN_FIRE_GAP_MS+1` when
-   the reservoir is reported at 90% of baseline; accepted when both clear.
-2. Native: baseline tracking ignores samples taken during recharge (feed a
-   decaying ramp, assert the baseline does not follow it down).
-3. Native: absolute floor overrides the relative gate — a reservoir at 100%
-   of a 10.0 V baseline is still refused.
-4. Bench: scope the cap node through a fire; confirm droop to ~9.5 V and RC
-   recovery within ~1.1 s on the 10,000 µF / 27 Ω build.
-5. Bench: `GET /status` reports `reservoir_ready: false` during the recovery
-   window and `true` after.
-
-### Risks
-
-- **ADC noise causing gate flap.** Mitigation: the 0.95 fraction sits far
-  from the settled value (which should read ~1.00), and `analogReadMilliVolts`
-  already averages internally.
-- **Baseline captured during a brownout** would be too low, making the gate
-  permanently easy. Mitigation: refuse to update the baseline below
-  `RAIL_MIN_FIRE_MV`.
-
-### Hand-off
-
-Firmware refuses to fire into an under-charged reservoir on any supply
-voltage in range, and `/status` exposes enough to diagnose why a press was
-ignored.
+1. **Removing the divider nearly broke the fire button.** `sample_pack_mv()`
+   was still reading GPIO 1, which now floats; `analogReadMilliVolts()` on a
+   floating pin returns drifting noise that crosses any threshold. Left live,
+   the button would have intermittently refused — a failure that presents as a
+   wiring fault. It returns 0 now, distinguishable from a real reading.
+2. **Removing the wake button nearly bricked the device.** Sleep entry was a
+   long-press on GPIO 2 and the only wake source was that same button. A
+   floating GPIO 2 reading LOW for a second would have slept the board with
+   nothing able to wake it. Whenever you delete an input, check what *else*
+   depended on it existing.
+3. `MIN_FIRE_GAP_MS` survives at 1500 ms, but as a UX affordance now, not an
+   electrical constraint. Nothing needs time to recharge.
 
 ---
 
-## Phase 13 — TWAI driver + heartbeat + time-sync slave — **keystone**
+## Phase 13 — TWAI driver + heartbeat + time-sync slave ✅ **landed 2026-08-16** — **keystone**
 
-### What lands
+### What landed
 
-- `src/can.{h,cpp}` — TWAI init at 1 Mbps on GPIO 17/18, RX task, TX helper.
-- `src/can_frames.h` — pure struct/pack/unpack for every frame in
-  [protocol.md §8](protocol.md), header-only so it links into `[env:native]`.
-- 10 Hz `CLAP_HEARTBEAT` emission, **unconditional from boot**.
-- `0x7DD` time-sync slave: maintain a wall-clock offset, expose
-  `wallclock::now_us()` and a `time_synced()` predicate with a 90 s staleness
-  window mirroring the bridge's own.
-- `CLAP_FIRE_EVENT` emission on each accepted fire (suppressed if never
-  synced — see §8.8).
-- `/status` gains a `can` object: `up`, `rx_count`, `tx_count`, `bus_errors`,
-  `time_synced`, `last_link_state`.
-- Native tests for pack/unpack round-trips and CRC.
+- `src/can_frames.h` — pure codec for every frame in [protocol.md §8](protocol.md).
+  Header-only, links into `[env:native]`.
+- `src/can.{h,cpp}` — TWAI at 1 Mbps on GPIO 17/18, RX task, bus-off recovery.
+- 10 Hz `CLAP_HEARTBEAT`, unconditional from boot.
+- `0x7DD` time-sync slave with a 90 s staleness window mirroring the bridge's.
+- `CLAP_FIRE_EVENT` on each accepted press.
+- `/status` gains a `can` object.
+- 16 native cases.
 
-### Why this is the keystone
+### Phase 13 implementation notes (read me before Phase 14+)
 
-Everything downstream assumes bidirectional CAN works. It is also the phase
-with the most *external* failure modes — the bridge's TX gate, termination,
-grounding — so it must be provable in isolation, before any rendering work
-depends on it.
-
-### The one non-obvious requirement
-
-**Heartbeat before you have heard anything.** The bridge's `can_cone_send()`
-refuses to transmit until it has seen a partner frame within 5 s. A clapboard
-that waits for `0x7DD` before heartbeating will wait forever, and the failure
-presents as "the bridge is broken" rather than "we never introduced
-ourselves". This is written into §8.1 and it is the single most likely
-bring-up trap.
-
-### Acceptance tests
-
-1. Native: every frame type round-trips through pack → unpack unchanged.
-2. Native: CRC-16/CCITT-FALSE matches a known-answer vector (cross-check
-   against the Jugglebot UDP implementation's own test vector).
-3. Bench, no bridge: `candump`-equivalent on a USB-CAN adapter shows the
-   10 Hz heartbeat within 1 s of boot, with correct DLC and ID.
-4. Bench, with bridge: `0x7DD` frames begin arriving; `/status` flips
-   `time_synced` true; the bridge's `tx_gated` counter stops climbing.
-5. Bench: pull the CAN cable; confirm the ESP32 does not hang, `bus_errors`
-   climbs, and reconnection recovers without a reboot.
-6. Bench: fire the button; confirm one `CLAP_FIRE_EVENT` per accepted press,
-   with a wall-clock value matching the Jetson's clock to within ~10 ms.
-
-### Risks
-
-- **TWAI driver blocking the Arduino loop.** Mitigation: RX on its own
-  FreeRTOS task with a queue; `loop()` never blocks on CAN.
-- **Bus-off recovery.** The ESP32 TWAI can latch bus-off. Mitigation:
-  explicit recovery path, surfaced in `/status`, tested by test 5.
-- **Grounding interaction with the flash.** Mitigation: test 6 fires while
-  CAN traffic is live and asserts no frame loss.
-
-### Hand-off
-
-The clapboard is a well-behaved node: it introduces itself, keeps wall-clock,
-reports fires, and survives cable abuse. No rendering has changed yet.
+1. **RX runs on its own FreeRTOS task, priority 2, pinned to core 0.**
+   `loop()` ticks at 50 ms, which cannot keep up with a 100 Hz broadcast, and
+   the task must not be starved by a 3 s e-paper refresh.
+2. **`TWAI_MODE_NORMAL`, never `NO_ACK` or `LISTEN_ONLY`.** Those make
+   bring-up appear to work against a dead bus, hiding the exact fault you are
+   testing for.
+3. **Bus-off recovery must explicitly restart the driver.**
+   `twai_initiate_recovery()` parks the controller in `STOPPED`; forgetting
+   the `twai_start()` afterwards is the classic "recovered but permanently
+   silent" bug.
+4. **`report_fire()` transmits AFTER raising the gate**, and emits nothing at
+   all when the clock has never been anchored. The flash instant is what the
+   record refers to; a missing sync record is recoverable in post, a
+   confidently wrong one corrupts an edit.
+5. **The heartbeat must run before Wi-Fi and before hearing anything.** The
+   bridge gates all TX on having seen a partner frame within 5 s, so a
+   clapboard that waits to be spoken to never will be — and it presents as
+   "the bridge is broken".
 
 ---
 
-## Phase 14 — On-device text rendering into template regions
+## Phase 14 — On-device text rendering ✅ **landed 2026-08-16**
 
-### What lands
+### What landed
 
-- `src/text_render.{h,cpp}` — draw a string into a rectangle against a 1bpp
-  framebuffer. **Fixed size, clip + ellipsis** per the agreed model: each
-  region carries its font size from authoring; overflow is truncated with a
-  trailing `…`.
-- `src/framebuffer.{h,cpp}` — a 48,000-byte PSRAM composite buffer: blit the
-  template background, draw fields, hand the result to `display::`.
-- Two or three embedded Adafruit-GFX fonts at fixed sizes.
-- `src/template_store.{h,cpp}` — LittleFS `/templates/` sibling to
-  `/screensaver/`, reusing the Phase 10 atomic-write and boot-reconcile
-  machinery.
-- `src/region.h` — pure region model (id, x, y, w, h, font, alignment),
-  header-only, unit-testable.
-- Native tests for fitting, clipping, ellipsis placement, alignment.
+- `src/text_fit.h` — pure fitting, wrapping, ellipsis, alignment.
+- `src/region.h` — pure box model + validation, closed `FontId` table.
+- `src/framebuffer.{h,cpp}` — 48 KB PSRAM `Adafruit_GFX` surface with a clip
+  rect.
+- `src/text_render.{h,cpp}` — font table, advance-table builder, `draw_field`.
+- `src/slate.{h,cpp}` — field values, built-in template, `GET /slate`.
+- 35 native cases.
 
-### Why fixed-size clip rather than shrink-to-fit
+### Smaller than planned, for one reason
 
-Shrink-to-fit is friendlier for arbitrary operator text but needs multiple
-font sizes resident and a measure-retry loop. Clip + ellipsis is predictable,
-cheapest in flash, and — the deciding factor — makes the *authoring* preview
-truthful: what the editor shows at design time is exactly what the panel
-renders, because there is no runtime reflow.
+`GFXcanvas1`'s buffer layout is byte-identical to our wire format — MSB-first,
+1 = ink, 100 bytes per row with no padding at 800 px. So subclassing
+`Adafruit_GFX` with a PSRAM-backed `drawPixel` inherits the entire font stack
+instead of needing a glyph blitter. `GFXcanvas1` itself is unusable directly:
+it `malloc`s into internal RAM.
 
-### Acceptance tests
+### Phase 14 implementation notes (read me before Phase 15+)
 
-1. Native: a string that fits renders unchanged; one character too long
-   renders with `…` and never exceeds the region's pixel bounds.
-2. Native: left/centre/right alignment place the same string at the expected
-   x offsets, and the ellipsis respects alignment.
-3. Native: empty string renders nothing and does not corrupt neighbours.
-4. Native: a region at the framebuffer's right/bottom edge clips rather than
-   wrapping into the next row of bytes (the classic 1bpp packing bug).
-5. Bench: composite a real template + eight populated fields, push to the
-   panel, photograph, compare against the editor's preview.
+1. **Ellipsis is `...`, not `…`.** The Adafruit Free fonts are printable-ASCII
+   only.
+2. **A box too narrow for even the ellipsis hard-truncates rather than
+   rendering empty.** A blank region on a slate reads as "no scene number" —
+   a *false* statement — whereas `Sce` is merely incomplete. This rule recurs
+   throughout: incomplete beats wrong.
+3. **Ascent/descent come from the font, not the string**, so `xyz` and `XYZ`
+   share a baseline. Per-string extents make fields visibly jump as content
+   changes, which looks like a rendering fault.
+4. **`draw_field` wipes its box first.** Patch semantics make
+   "Take 12" → "Take 9" routine, and a stale trailing `2` is indistinguishable
+   from correct output.
+5. **The composite buffer is separate from `frame.cpp`'s.** Sharing saves 48 KB
+   of 8 MB while creating a race where a `/frame` POST lands mid-composite.
+6. `slate.cpp` was not in the original scope. It exists because a renderer
+   nothing calls is untested rendering code, and acceptance test 5 wanted a
+   photograph.
 
-### Risks
+### Phase 14b — multi-line fields ✅ **landed 2026-08-16**
 
-- **This is the phase most likely to overrun.** It is a new capability, not a
-  port. Mitigation: build against a fixture template committed to
-  `web/src/__fixtures__/` and iterate natively before touching hardware.
-- **PSRAM allocation timing.** 48 KB is nothing against 8 MB, but allocate
-  once at boot, never per-render.
+Added on user request after bench validation. Fields wrap at the box width and
+keep flowing until the next line will not fit vertically; the ellipsis appears
+only when both dimensions are exhausted.
 
----
-
-## Phase 15 — Template authoring in the editor + `POST /template`
-
-### What lands
-
-- Editor: mark any text element as a **CAN field** and assign it an id 0–7.
-  Validation for duplicate ids and for >8 fields.
-- Editor: a template export that produces (a) a 48 KB background raster with
-  field regions left blank and (b) a region manifest.
-- `POST /template?id=N` accepting both parts; documented in protocol.md.
-- `GET /templates` manifest endpoint mirroring `GET /screensaver/manifest`.
-- Editor preview showing placeholder text in each field region so the author
-  can see truncation before it ships.
-
-### Acceptance tests
-
-1. Vitest: assigning a duplicate field id is rejected with a visible error.
-2. Vitest: the exported background has field regions blank (no placeholder
-   text baked into the raster).
-3. Vitest: region manifest round-trips through JSON unchanged.
-4. Hardware: push a template, reboot, confirm it survives via `GET /templates`.
-5. Hardware: push a template while a CAN transaction is mid-flight; confirm
-   one is rejected cleanly rather than producing a torn composite.
+- Word-boundary breaks preferred; a word wider than the box breaks mid-word
+  rather than being dropped (same incomplete-beats-wrong rule).
+- `\n` forces a break — previously it rendered as a literal `?`.
+- **The clip rect was added here, not for tidiness.** Without clipping, a font
+  taller than its box painted descenders over the field below; wrapping turns
+  that from a few pixels into a whole spilled line. The fast
+  `HLine`/`VLine`/`fillRect`/`fillScreen` overrides bypass `drawPixel`, so each
+  had to learn the clip separately.
+- **One deliberate non-invariant:** a box narrower than a single glyph emits
+  that glyph and lets the clip cut it. Zero characters would spin the wrap loop
+  or blank the field. Both test suites encode the exception.
 
 ---
 
-## Phase 16 — `CLAP_FIELD` / `COMMIT` / `ACK` ingest + composite render
+## Phase 15 — Template authoring + `POST /template` ✅ **landed 2026-08-16**
 
-### What lands
+### What landed
 
-- Reassembly buffer: 8 fields × 32 chars, chunk-order-independent.
-- `src/clap_txn.h` — pure transaction state machine (accumulate → commit →
-  validate CRC → render → ack), header-only for `[env:native]`.
-- Patch semantics: fields absent from the commit mask retain prior values.
-- `CLAP_ACK` emission with real `render_ms`.
-- Date autofill: a reserved field populated from the time-sync wall clock.
+- `src/template_wire.h` — pure codec for the 48,100-byte upload body.
+- `src/template_store.{h,cpp}` — LittleFS `/templates/`, atomic writes,
+  boot reconciliation.
+- `POST /template?id=N`, `GET /templates`.
+- Editor: `canFieldId`/`canFontId` on `TextElement`, `CanFieldControls.tsx`,
+  `templateExport.ts`, a slot picker and a **Send template** button.
+- `tools/export_gfx_metrics.py` → `web/src/editor/fontMetrics.ts`.
+- 15 native + 34 vitest cases.
 
-### Acceptance tests
+### The font-metrics generator is load-bearing
 
-1. Native: chunks delivered in reverse order reassemble identically.
-2. Native: a commit naming a field with a missing chunk yields `INCOMPLETE`.
-3. Native: a corrupted payload byte yields `CRC_MISMATCH` and leaves prior
-   field values **untouched** (a failed transaction must not half-apply).
-4. Native: a commit arriving during a render yields `BUSY`.
-5. Native: patch semantics — update field 2 only, assert fields 0–1 and 3–7
-   unchanged.
-6. Hardware: full path from a `cansend` script to a painted panel, with
-   `render_ms` in the ack matching observed panel time.
+Phase 14's argument for clip-over-shrink was that the author sees exactly
+where text truncates. **That only holds if the editor measures with the
+device's advance widths.** Guessing from a browser font would put the ellipsis
+in the wrong place — worse than no preview, because it looks authoritative and
+is wrong. The generator parses the firmware's own GFX headers; CI regenerates
+and diffs the output, so a change to the `FONTS` table cannot silently make
+the preview lie.
 
-### Risks
+Glyph *shapes* in the preview remain browser-rendered and approximate. Only
+the metrics are exact, and metrics are the half that determines truncation.
 
-- **Torn renders from a commit landing mid-paint.** Mitigation: the `BUSY`
-  outcome exists precisely for this; test 4 is not optional.
+### Phase 15 implementation notes (read me before Phase 16+)
 
----
-
-## Phase 17 — Screensaver rework; deep sleep retired
-
-### What lands
-
-- Deep sleep removed from the CAN build. It is incompatible with CAN — TWAI
-  stops, the node stops ACKing, and the bridge's TX gate closes.
-- The Phase 10 screensaver collapses from ~1200 lines to ~200: no RTC-timer
-  wake, no wallclock-anchoring-across-sleep, no NVS round-robin counter. It
-  becomes a `millis()` timer in the main loop with a `round_robin` picker.
-- Mode arbitration per [protocol.md §8.5](protocol.md): `CLAP_LINK` push
-  primary, 3 s `CLAP_LINK` staleness and 90 s `0x7DD` staleness as backstops,
-  screensaver as the boot default.
-- The wake button is repurposed as a Wi-Fi/config-mode toggle.
-- The 60 s minimum cycle interval is **retained** — it was never about
-  battery, it is about the panel's refresh budget.
-
-### Acceptance tests
-
-1. Native: mode arbitration truth table (all five rows of §8.5).
-2. Native: a `CLAP_LINK` UP followed by 3 s of silence resolves to
-   screensaver.
-3. Hardware: kill `teensy_bridge_node`; panel drops to screensaver within
-   ~1 s (push path).
-4. Hardware: unplug the CAN cable mid-scene; panel drops to screensaver
-   within ~3 s (staleness path). **This is the test that distinguishes this
-   design from a push-only one** — nobody sends a message in this scenario.
-5. Hardware: 24 h soak with ROS2 up; confirm no unexpected screensaver
-   transitions and no panel ghosting accumulation.
-
-### Risks
-
-- **Mode flap during a routine `ros2 launch` restart** would cost two full
-  refreshes of visible churn. Mitigation: measure a real restart cycle in
-  test 3; if it exceeds the 3 s staleness window, raise the window rather
-  than adding hysteresis (simpler, and the push path already handles the
-  intentional-shutdown case promptly).
+1. **Fixed-length binary, not JSON.** Keeps `/frame`'s most useful validation
+   ("Content-Length must be exactly N") and keeps a parser off the critical
+   path of a 48 KB upload.
+2. **Templates cap at 8, not the wire's 16.** `slate_data` is 3.456 MB, the
+   screensaver may claim 2.4 MB, and 8 templates add 385 KB for ~20% headroom.
+   A native test asserts the budget so raising the cap fails loudly rather
+   than months later with "partition full".
+3. **`isCanField` tests `!== undefined`, not truthiness.** `if (el.canFieldId)`
+   drops field 0 — the date — the one field always present.
+4. **Init order bug found here:** `slate::begin()` ran before LittleFS was
+   mounted, so boot-time adoption of stored template 0 silently failed and
+   reverted to the built-in on every reboot. `screensaver::begin()` is what
+   mounts the filesystem; anything reading it must come after.
+5. **`FreeMonoBold18pt7b` is not perfectly monospaced** — lowercase `q` is
+   22 px against 21. Digits and uppercase are all 21, so the anti-jitter
+   property holds for what the font is for. Recorded in `region.h`.
 
 ---
 
+## Phase 16 — CAN field ingest ✅ **landed 2026-08-16**
+
+### What landed
+
+- `src/clap_txn.h` — pure transaction machine: stage, validate, apply, ack.
+- `CLAP_FIELD`/`CLAP_COMMIT` handling and `CLAP_ACK` emission in `can.cpp`.
+- `template_id` honoured, with the switch deferred to `loop()`.
+- Field values consolidated into a single owner.
+- 17 native cases.
+
+### Phase 16 implementation notes (read me before Phase 17+)
+
+1. **A rejection applies nothing.** A half-applied slate is worse than a stale
+   one — the operator cannot tell which fields are current.
+2. **Idempotent replay is required, not a nicety.** After a commit, staging is
+   cleared; without replay detection a retried commit answers `INCOMPLETE`,
+   reporting failure for a transaction the panel is showing.
+3. **`BUSY` must not be recorded as the outcome.** The sender retries with the
+   same `txn_id`, and a recorded `BUSY` would replay forever.
+4. **A `CLAP_LINK` DOWN abandons staging.** Chunks staged before a cable pull
+   must not complete against a commit sent after it returns; merging two
+   shots into one slate is the worst failure this device has.
+5. **`template_id` cannot be ignored.** Rendering the requested fields into
+   whatever layout is active produces a wrong slate that looks right.
+   Availability is a bitmask check on the RX task; the LittleFS load is
+   deferred to `loop()`.
+6. **`render_ms` in the ack is the *previous* render's duration.** Waiting for
+   the real figure would stall time-sync reception for the whole refresh. The
+   ack means "accepted and queued", not "on the panel".
+
+---
+
+## Phase 17 — Mode arbitration; deep sleep retired ✅ **landed 2026-08-16**
+
+### What landed
+
+- `src/mode_state.h` — pure §8.5 truth table plus a transition tracker.
+- Scene entry clears fields and autofills the date; screensaver entry paints
+  immediately and starts the cycle.
+- Screensaver cycling moved from RTC timer-wake to a `millis()` timer.
+- `screensaver::paint_current_slate()` / `paint_next_slate()` / `has_slates()`.
+- 5 native cases on the truth table.
+
+### Phase 17 implementation notes
+
+1. **Push primary, staleness as backstop — and the backstop is the point.**
+   If the Teensy dies or the cable is pulled, nobody sends "ROS2 is down", so
+   a push-only design leaves the *healthiest-looking* state on the panel
+   during the *severest* failure. `test_dead_teensy_shows_screensaver_not_the_last_scene`
+   is the test that distinguishes the two designs.
+2. **Scene entry clears every field.** Carrying the previous session's take
+   number forward would have an operator read a stale number as current.
+3. **Single-pass render on the awake cycle**, unlike the deep-sleep path's
+   white-then-content pair. That pair absorbs the panel's deep-refresh
+   post-cycle when nothing runs for minutes; awake it would double the visible
+   churn every tick.
+4. **With no slates stored, the panel is left as-is, not blanked.** A white
+   panel is indistinguishable from a dead device, and screensaver mode exists
+   to *signal* a dead link, not imitate one.
+5. **Arbitration is skipped entirely when the TWAI driver is down.** Caught
+   during wiring: with arbitration live, a CAN-less board parks in screensaver
+   mode permanently and silently swallows every `/slate` render, breaking the
+   bench path. A device with no CAN has no link to have an opinion about.
+6. The 60 s minimum cycle interval is **retained**. It was never about battery
+   life; it is about the panel's refresh budget.
+
+### Not yet hardware-validated
+
+Phases 16 and 17 build and their pure logic is tested, but the ingest path has
+never seen a real frame and mode arbitration has never seen a real
+`CLAP_LINK` — which does not exist on the bridge yet. See
+[protocol.md §8.11](protocol.md) for bench injection frames that exercise both
+without the Teensy.
+
+---
 ## Peer-repo work (Jugglebot)
 
 Tracked separately in [can-integration-handoff.md](can-integration-handoff.md).

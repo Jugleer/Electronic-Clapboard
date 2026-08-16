@@ -6,6 +6,28 @@
 That document is normative; this one tells you where to put things and what
 the traps are.
 
+> **Clapboard-side status: code-complete as of 2026-08-16.** Every frame in §8
+> is implemented and the firmware is on hardware. `CLAP_HEARTBEAT`,
+> `CLAP_FIRE_EVENT` and the `0x7DD` time-sync slave are hardware-validated;
+> `CLAP_FIELD`/`COMMIT`/`ACK` ingest and `CLAP_LINK` mode arbitration build
+> and are unit-tested but have never seen a real frame, because `CLAP_LINK`
+> does not exist on the bridge yet.
+>
+> Two things this changes for you:
+> - **You can test against a live clapboard immediately.** Its heartbeat is
+>   already on CAN3 at 10 Hz, so the bridge's TX presence gate should already
+>   be open.
+> - **[protocol.md §8.11](protocol.md) has bench-injection frames**, including
+>   a worked transaction with a correct CRC. Use them to sanity-check your
+>   encoder against a device that is known to accept them, before wiring the
+>   ROS2 action on top.
+>
+> §8 also gained two subsections after this brief was first written —
+> **§8.4's transaction-semantics table** (all-or-nothing, idempotent replay,
+> why `BUSY` is not terminal) and **§8.10's device limits**. Read both before
+> writing the action server's retry logic; they determine what a retry is
+> allowed to assume.
+
 ---
 
 ## 0. Context in one paragraph
@@ -237,9 +259,24 @@ string stage            # "sending" | "awaiting_ack" | "rendering"
    arrival order. Reuse the existing UDP-protocol CRC implementation; it is
    the same variant.
 3. **`txn_id` allocation** and correlating the returned `CLAP_ACK`.
-4. **Timeout** — if no ack within ~8 s (comfortably past a 3.5 s full refresh
-   plus margin), abort the goal. Do not retry automatically: a retry that
-   races a slow render produces `BUSY` and confuses the operator.
+4. **Timeout** — if no ack within ~8 s, abort the goal.
+
+   **The clapboard's ack semantics changed what "retry" means here**, so read
+   §8.4 before implementing this:
+
+   - The ack is emitted **when the commit is validated, not when the panel
+     has painted**. `render_ms` is the *previous* render's duration. So an
+     ack arriving in 5 ms is normal and does not mean the slate is up yet.
+   - A retry with the **same `txn_id`** is safe and correct. The device
+     detects the replay, re-acks with the stored outcome, and does not
+     re-render. This is what makes a lost ack recoverable — so *do* retry
+     once on timeout, contrary to the earlier advice here.
+   - A retry landing while a render is in flight returns `BUSY`. That is
+     transient and not recorded, so retrying again with the same `txn_id`
+     succeeds. Do not treat `BUSY` as a terminal failure.
+   - **Never reuse a `txn_id` for different content.** Replay detection is
+     keyed on it alone; a recycled id with new fields is silently swallowed
+     as a duplicate and the panel never updates.
 5. **Validation** — reject field ids > 7 and strings > 32 chars at the action
    boundary with a clear message, rather than letting the clapboard reject
    them after a bus round-trip.

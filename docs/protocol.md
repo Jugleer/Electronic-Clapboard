@@ -570,6 +570,98 @@ existing fields' types are stable. The `picker_mode` enum may be
 extended (e.g. a future `"shuffle"` mode); clients must tolerate
 unknown values gracefully (treat as `round_robin` for display).
 
+### 2.7 Templates — authoring the layout CAN fields land in (Phase 15)
+
+A **template** is a background raster plus a contract about where the robot's
+text goes. It is the authoring counterpart to §8's runtime data: the editor
+pushes templates over HTTP while the device is on the bench, and CAN then
+carries only field *values*. See §8's preamble for why the transports split
+that way.
+
+#### `POST /template?id=N`
+
+| Field | Value |
+|-------|-------|
+| Method | `POST` |
+| Query | `id` — 0..7 (`MAX_TEMPLATES`) |
+| Content-Type | `application/octet-stream` |
+| Content-Length | **exactly 48100** |
+
+Body is fixed-length binary — a 48,000-byte raster followed by a 100-byte
+region trailer. Fixed length rather than JSON keeps `/frame`'s single most
+useful validation ("Content-Length must be exactly N") and keeps a parser off
+the critical path of a 48 KB upload.
+
+**The raster must leave every CAN field box blank.** The editor rasterises
+with field elements filtered out. Baking placeholder text in would leave it
+burned behind every real value the robot sends.
+
+Trailer layout:
+
+```
+offset size field               notes
+0      2    magic       u16 LE  0x4C54, bytes 'T','L'
+2      1    version     u8      1
+3      1    region_count u8     0..8
+4      96   regions             8 × 12-byte records, always all 8 slots
+```
+
+Region record (12 bytes):
+
+```
+0     field_id     u8
+1-2   x            i16 LE
+3-4   y            i16 LE
+5-6   w            u16 LE
+7-8   h            u16 LE
+9     font_id      u8      index into region::FontId
+10    flags        u8      bits0-1 halign, bits2-3 valign, bit4 invert
+11    reserved     u8      must be 0
+```
+
+Unused slots are zero-filled, which keeps the body byte-stable for a given
+design so two uploads of the same template are diffable.
+
+The trailer is **validated before a single byte is written**: bad magic,
+wrong version, `region_count > 8`, an out-of-panel box, or duplicate field
+ids all reject with `400` and leave the stored template untouched. On success
+the device adopts the template immediately and repaints — the author's next
+action is to look at the panel.
+
+`200` body: `{"ok":true,"id":N,"regions":R,"selected":true,"render":"queued"}`
+
+#### `GET /templates`
+
+```json
+{"ok": true, "max": 8, "active": 0, "builtin": false, "stored": [0, 2]}
+```
+
+`builtin: true` means no stored template is active and the device is
+rendering its compiled-in default layout.
+
+### 2.8 `GET /slate` — bench field injection (dev/diagnostic)
+
+Not part of the runtime contract; the robot uses CAN. Sets any field named in
+the query string and queues a composite.
+
+| Param | Effect |
+|---|---|
+| `f0`…`f7` | Set that field's value |
+| `clear` | Blank every field first |
+
+`GET /slate?f2=SC%2014&f3=T%2003` → `{"ok":true,"fields_set":2,"render":"queued"}`
+
+The response returns immediately and the panel repaints ~2 s later: the
+handler runs on the AsyncTCP task and blocking it for a full refresh trips
+LWIP and the watchdog, so rendering is deferred to `loop()` — the same
+discipline §2.1's deferred lock-in uses.
+
+**Works only while CAN is absent or the link is healthy.** In screensaver
+mode a queued scene render is dropped rather than deferred, because by the
+time the link returns the fields it would have drawn are stale. With no CAN
+driver at all, mode arbitration is skipped entirely and this endpoint behaves
+exactly as it did before Phase 17.
+
 ---
 
 ## 3. CORS
@@ -713,10 +805,31 @@ of each present field's **32-byte NUL-padded** buffer, in ascending field_id
 order. Padding to a fixed width rather than hashing the trimmed strings makes
 the CRC independent of chunk arrival order.
 
-A commit naming a field for which no chunk arrived is a `INCOMPLETE`
+A commit naming a field for which no chunk arrived is an `INCOMPLETE`
 rejection. Fields **not** named in the mask retain their previous value —
 this is a patch, not a replace, so ROS2 can update just the take number
 without resending the scene description.
+
+`template_id` selects the layout to render into. An id the device has not
+stored is `NO_TEMPLATE`; id 0 always resolves, because it is either a stored
+template or the built-in default. The device stores **8** templates even
+though this field allows 16 — see §8.10.
+
+#### Transaction semantics (implementation-normative)
+
+These are contract, not implementation detail: the sender's retry logic
+depends on them.
+
+| Rule | Behaviour |
+|---|---|
+| **All-or-nothing** | A rejected commit applies *nothing*. Every field keeps its previous value. A half-applied slate is worse than a stale one — the operator cannot tell which fields are current. |
+| **Idempotent replay** | A commit whose `txn_id` matches the last completed one is re-acked with the *stored* outcome and does **not** re-render. This is what makes a lost `CLAP_ACK` safe to retry. Without it the replay finds staging cleared and answers `INCOMPLETE`, reporting failure for a transaction the panel is showing. |
+| **`BUSY` is not terminal** | `BUSY` is *not* recorded as the transaction's outcome. The sender is expected to retry with the **same** `txn_id`, and that retry is treated as a fresh attempt rather than replayed. Recording it would answer `BUSY` forever. |
+| **Link drop abandons staging** | A `CLAP_LINK` transition to DOWN discards any partially-staged transaction. Chunks staged before a cable pull must not complete against a commit sent after it returns; merging two shots into one slate is the worst failure this device has. |
+| **Unmasked staging is discarded** | Chunks for fields absent from the commit mask are dropped, not held for a later transaction. |
+
+A rejected transaction also clears staging, so a bad transaction cannot
+contaminate the next one.
 
 ### 8.5 `CLAP_LINK` (0x7EA) — Bridge→Clap, 8 bytes
 
@@ -773,6 +886,17 @@ refresh is 1.5–3.5 s, so the ROS2 action's duration is dominated entirely by
 the panel rather than the wire. The action should not report success until
 this frame arrives.
 
+**`render_ms` is the PREVIOUS render's duration, not this one's.** The ack is
+emitted from the CAN RX task the moment the commit is validated, because
+waiting for the repaint would stall time-sync reception for the whole 1.5–3.5 s.
+So the figure means "how long this device takes to paint", which is what a
+timeout budget needs, rather than "how long this exact repaint took". It is 0
+until the first render completes.
+
+The ack therefore confirms **accepted and queued**, not **on the panel**. A
+consumer that needs painted-confirmation should watch `CLAP_HEARTBEAT.state`
+leave `RENDERING`.
+
 ### 8.7 `CLAP_HEARTBEAT` (0x7EC) — C→J, 8 bytes, 10 Hz
 
 ```
@@ -815,6 +939,36 @@ already copies every frame received on that bus into an SPSC ring and
 forwards each verbatim to the Jetson as a `CONE_FRAME` UDP message. The
 Jetson-side handler must learn the `0x7E8`–`0x7EF` IDs, but the transport
 exists.
+
+### 8.10 Device limits and behaviours the sender should know
+
+| Property | Value | Consequence for the sender |
+|---|---|---|
+| Fields | 8 (`0`–`7`) | `BAD_FIELD_ID` above 7 |
+| Chars per field | 32 | Truncated silently if longer; validate at the action boundary |
+| Templates stored | **8** (`0`–`7`) | `template_id` 8–15 is well-formed on the wire but always `NO_TEMPLATE`. The cap is flash budget, not protocol — see the reasoning in `src/template_wire.h`. |
+| Field text | printable ASCII `0x20`–`0x7E` | Anything else renders as `?`. **Except `\n`**, which forces a line break. |
+| Wrapping | word-wrap at the box width | Text flows onto further lines until the next will not fit vertically; the ellipsis (`...`, three ASCII periods — the fonts have no `…` glyph) appears only when both dimensions are exhausted |
+| Date | autofilled on Scene entry into field 0 | Do **not** send it. The device derives it from `0x7DD`, and sending one races the clock the bridge is already distributing. A CAN value does override it if a shoot needs that. |
+| Scene entry | clears **all** fields | The first commit after a link comes back starts from blank, not from the previous session's values |
+
+### 8.11 Bench injection (no Teensy required)
+
+Scene mode needs `CLAP_LINK` UP **and** a fresh time anchor, both periodic.
+To exercise the clapboard before the bridge-side work lands, inject:
+
+```
+7EA  01 00 00 00 00 00 00 00     every 500 ms   (must beat LINK_STALE 3 s)
+7DD  <u32 sec LE><u32 usec LE>   every 1 s      (must beat 90 s; skip if the bridge is live)
+```
+
+A worked example transaction — fields 2 and 3, template 0, txn 1:
+
+```
+7E8  02 53 43 20 31 34 00 00     field 2 = "SC 14"
+7E8  03 54 20 30 33 00 00 00     field 3 = "T 03"
+7E9  00 0C 00 01 C7 73 00 00     commit, mask 0x0C, crc 0x73C7
+```
 
 ---
 

@@ -5,7 +5,7 @@
 An electronic clapboard (film slate) for syncing multiple simultaneous camera angles with scene/take labels. As of Part II of the build plan it is a **peripheral on the Jugglebot robot's CAN harness** rather than a standalone battery device.
 
 ### Core functions
-1. **Label display** — Scene/take info on a large e-paper display. Templates authored in the browser editor over Wi-Fi; per-take field values delivered over CAN by a ROS2 action.
+1. **Label display** — Scene/take info on a large e-paper display. Templates authored in the browser editor over Wi-Fi; per-take field values delivered over CAN by a ROS2 action. Fields word-wrap and ellipsise on the device.
 2. **Visual sync** — High-power LED flash (50 ms pulse) visible to all cameras. Physical button only.
 3. **Timestamping** — Wall-clock instant of each flash, slaved to the robot's CAN time-sync master and reported back to ROS2.
 4. **Health proxy** — The panel doubles as a ROS2 liveness indicator: scene frame = ROS2 up, screensaver = something upstream is not.
@@ -15,11 +15,11 @@ An electronic clapboard (film slate) for syncing multiple simultaneous camera an
 ### Hardware platform
 - **MCU:** ESP32-S3-DevKitC-1 N16R8 (16 MB flash, 8 MB PSRAM). Note: the octal PSRAM consumes GPIO 33–37.
 - **Display:** Waveshare 7.5" V2 e-paper (800×480, B/W), SPI interface
-- **Sync LED:** High-power LED via IRLZ44N N-channel MOSFET, fed from a **local reservoir cap**, not the rail
+- **Sync LED:** 12 V module via IRLZ44N N-channel MOSFET, drawing **directly from the rail** (0.35 A measured; a reservoir cap was designed and then deleted — see wiring-guide Phase 6)
 - **Bus:** SN65HVD230 transceiver on the Jugglebot **CAN3** drop, 1 Mbps classic CAN
 - **Input:** Browser editor over Wi-Fi (authoring) + CAN (runtime). No keyboard.
 - **Power:** Jugglebot shared 12 V harness → buck → 5 V. **Hard budget: < 0.5 A at all times**, including plug-in inrush and the flash.
-- **Protection:** 1 A inline fuse, reverse-polarity Schottky, firmware ADC reservoir monitoring
+- **Protection:** 1 A inline fuse, reverse-polarity Schottky. No firmware rail monitoring — the divider was removed; a stiff supply is present or absent and the MCU browns out before a threshold could fire.
 
 ### Pin assignments
 Canonical source is [include/config.h](include/config.h); the consolidated table with rationale is in [docs/wiring-guide.md](docs/wiring-guide.md).
@@ -37,12 +37,12 @@ CAN_TX:        GPIO 17
 CAN_RX:        GPIO 18
 
 # Buttons / status
-WAKE_BUTTON:   GPIO 2   # button-to-GND, internal pull-up
 FIRE_BUTTON:   GPIO 14  # button-to-GND, internal pull-up
 WAKE_LED:      GPIO 21  # HIGH = awake
 
-# Reservoir ADC — tapped at the CAP NODE, not the rail
-VBATT_ADC:     GPIO 1   # via divider 10k/2.2k (was 10k/3.3k; see below)
+# NOT FITTED — both guarded by compile-time flags in config.h
+WAKE_BUTTON:   GPIO 2   # CLAPBOARD_HAS_WAKE_BUTTON 0 — deep sleep retired
+VBATT_ADC:     GPIO 1   # CLAPBOARD_HAS_RAIL_ADC 0 — divider removed
 ```
 
 **Unavailable on this board:** 26–32 (SPI flash), 33–37 (octal PSRAM on N16R8), 43/44 (UART0), 19/20 (native USB CDC), 48 (onboard RGB LED), 0/3/45/46 (strapping). GPIO 13 is technically free but is the Arduino-ESP32 default SPI MISO and gets reclaimed by `SPI.begin()` — this project already lost the status LED to it once.
@@ -50,10 +50,9 @@ VBATT_ADC:     GPIO 1   # via divider 10k/2.2k (was 10k/3.3k; see below)
 ### Key constraints
 - ESP32 GPIOs output 3.3V; MOSFETs must be logic-level (Vgs(th) well below 3.3V) — IRLZ44N satisfies this
 - E-paper refresh is slow (~1.5–3.5 s); only update between takes, not during
-- **LED pulse is 50 ms and that is a floor, not a preference.** It must exceed one camera frame period or a sub-360° shutter can miss it entirely (24 fps = 41.7 ms frame, but a 180° shutter is open for only 20.8 ms of it). Do not shorten the pulse to increase brightness — brightness comes from the reservoir.
-- **The 12 V rail is shared with the Jetson under a 0.5 A ceiling.** The flash draws from a local cap; the rail only ever sees recharge current. Plug-in inrush (`V/R`) is bound by the same ceiling and is what sizes the charge resistor.
-- **Reservoir C, charge resistor R, and `MIN_FIRE_GAP_MS` move together.** `MIN_FIRE_GAP_MS >= 4RC`. The firmware cannot detect a mismatch; the Phase 12 voltage gate makes a stale constant *safe*, not *silent*. Sanctioned combinations are tabulated in wiring-guide Phase 6.
-- The ADC divider is 10k/2.2k, not 10k/3.3k — the old ratio put 12 V at 2.98 V, past the S3 ADC's well-calibrated ceiling of ~2.45 V, i.e. the fire gate read the least linear part of the curve
+- **LED pulse is 50 ms and that is a floor, not a preference.** It must exceed one camera frame period or a sub-360° shutter can miss it entirely (24 fps = 41.7 ms frame, but a 180° shutter is open for only 20.8 ms of it). Do not shorten the pulse to increase brightness — with no reservoir, brightness is set by the LED's rail current.
+- **The 12 V rail is shared with the Jetson under a 0.5 A ceiling.** Measured worst case is 0.43 A (0.38 A with the LED lit during a full refresh, plus ~0.05 A transceiver). The LED module must draw ≤ 0.30 A and be rated for *continuous* operation — the bench hold-mode leaves it lit for up to 30 s.
+- **Two compile-time flags gate absent hardware**, and flipping either without fitting the part is worse than leaving it: `CLAPBOARD_HAS_RAIL_ADC 1` with no divider reads a floating pin whose noise makes the fire button intermittently refuse; `CLAPBOARD_HAS_WAKE_BUTTON 1` with no button lets a floating GPIO 2 sleep the device with nothing able to wake it.
 - High-current LED return goes to harness GND via a star point — not through the ESP's ground, and not sharing a conductor with the CAN transceiver's ground return
 - 100kΩ pulldown on each MOSFET gate to keep loads OFF during ESP boot (GPIOs float briefly)
 - **The clapboard must transmit its CAN heartbeat unconditionally from boot.** The can-bridge gates all transmission on having seen a partner frame within 5 s; a clapboard that waits to be spoken to first never will be. This is the most likely bring-up trap.
@@ -62,7 +61,8 @@ VBATT_ADC:     GPIO 1   # via divider 10k/2.2k (was 10k/3.3k; see below)
 - **Framework:** Arduino (ESP32 Arduino Core), PlatformIO
 - **Two transports, split by duty** — HTTP over Wi-Fi carries *authoring* (48 KB frames, screensaver slates, templates); CAN carries *runtime* (per-take field values, mode, fire timestamps). Pushing a frame over CAN would be 6,000 frames ≈ 0.67 s of 100% bus occupancy versus ~5 ms for a field update. Contract: [docs/protocol.md](docs/protocol.md) — §1–§6 HTTP, §8 CAN.
 - **Display mode is the top-level state**, resolved from CAN liveness (protocol.md §8.5): screensaver on boot, scene template while ROS2 is up, screensaver again on any staleness. Every failure path converges on screensaver so the panel is readable as a health indicator.
-- **Pure logic is header-only and linked into `[env:native]`** — `fire_state.h`, `power_state.h`, `lockin_state.h`, `screensaver_state.h`, and (Part II) `can_frames.h`, `region.h`, `clap_txn.h`. Hardware glue lives in the matching `.cpp`. This boundary is why cutting audio sync in Phase 11 required no change to the tested state machine.
+- **Pure logic is header-only and linked into `[env:native]`** — `fire_state.h`, `power_state.h`, `lockin_state.h`, `screensaver_state.h`, and (Part II) `can_frames.h`, `text_fit.h`, `region.h`,
+  `template_wire.h`, `clap_txn.h`, `mode_state.h`. Hardware glue lives in the matching `.cpp`. This boundary is why cutting audio sync in Phase 11 required no change to the tested state machine.
 - **Libraries:** `GxEPD2` (e-paper), `Adafruit GFX` (fonts, Part II), `ESPAsyncWebServer`, ESP-IDF `driver/twai.h` (CAN)
 
 ## Code standards
@@ -76,14 +76,13 @@ VBATT_ADC:     GPIO 1   # via divider 10k/2.2k (was 10k/3.3k; see below)
 - Group pin definitions and hardware constants in a single `config.h` header
 - ISRs must be minimal: set a flag, defer work to `loop()`
 - No blocking delays in main loop — use millis()-based timers or FreeRTOS tasks
-- All magic numbers get named constants with units in the name (e.g., `LED_PULSE_MS`, `RAIL_MIN_FIRE_MV`)
+- All magic numbers get named constants with units in the name (e.g., `LED_PULSE_MS`, `MIN_FIRE_GAP_MS`)
 
 ### Safety rules (non-negotiable)
 - MOSFET gate outputs must default LOW on boot. Verify with `pinMode(pin, OUTPUT); digitalWrite(pin, LOW);` at top of `setup()`. **This includes `PIN_SOLENOID_GATE`** even though nothing raises it — an unclaimed pin floats, and a floating gate on a populated MOSFET can latch the load on.
 - The flash pulse must have a firmware-enforced maximum duration (`FIRE_MAX_PULSE_MS`), asserted at compile time. A hardware-timer ISR must force the gate LOW even if `loop()` hangs — it runs independent of FreeRTOS scheduling, AsyncTCP queue depth, and display SPI.
-- Reservoir voltage must be checked before every sync event. Refuse to fire below `RAIL_MIN_FIRE_MV` (absolute floor) or below `FIRE_CAP_READY_FRACTION` of the observed idle baseline (relative gate). **Both gates, not either** — they fail differently: the timer is deterministic but assumes a compiled-in (C, R), while the voltage gate adapts to real hardware but depends on an ADC that could read wrong.
-- **Never exceed 0.5 A draw from the 12 V harness.** It is shared with the Jetson. This is enforced by topology (flash from a cap, recharge through a resistor), not by firmware — do not add a code path that draws from the rail directly.
-- Never drive the LED without the reservoir cap confirmed present and correctly polarised in hardware
+- **Never exceed 0.5 A draw from the 12 V harness.** It is shared with the Jetson and nothing in firmware enforces this — it is a property of the parts fitted. Measured worst case is 0.43 A. Any change that could raise steady draw (a brighter LED, a second emitter, holding the gate longer) must be re-measured with `CLAPBOARD_LED_HOLD_MODE 1` before it ships.
+- **Never enable a `CLAPBOARD_HAS_*` flag without fitting the hardware it guards.** Both failure modes are worse than the missing feature: a floating ADC pin makes the fire button intermittently refuse, and a floating wake-button pin can sleep the device with no wake source.
 
 ### Testing
 - Unit tests for state machine logic, label parsing, voltage threshold logic
@@ -108,7 +107,7 @@ VBATT_ADC:     GPIO 1   # via divider 10k/2.2k (was 10k/3.3k; see below)
 - Pushing on `main` is fine for this project (small team, fast iteration); the protected-branch / force-push prohibitions still apply.
 - If asked to "commit and push" or "/commit then push", treat that as one operation: run /commit first, verify it succeeded cleanly, then push.
 
-## Repository structure (current, post-Phase 11)
+## Repository structure (current, post-Phase 17)
 
 The repo evolved from "single-firmware ESP32 project" into "ESP32
 firmware + browser editor", and split the firmware into a typewriter
@@ -119,13 +118,27 @@ categorised icon library — pre-rasterised PNG masters in
 `web/public/icons/` plus registry/loader/picker UI under
 `web/src/editor/icons/`; see [docs/icons.md](docs/icons.md).
 
-**Part II (Phases 11–17) is in progress.** The tree below is
-pre-Part-II except where noted; the modules Part II adds
-(`can.*`, `can_frames.h`, `text_render.*`, `framebuffer.*`,
-`template_store.*`, `region.h`, `clap_txn.h`) are specified in
-[docs/phased-build-plan.md](docs/phased-build-plan.md) Part II but not
-yet written. Two documents are load-bearing for that work and did not
-exist before:
+**Part II (Phases 11–17) is code-complete**; Phases 14b–17 are not yet
+hardware-validated. The modules it added, all under `src/` unless noted:
+
+| Module | Role |
+|---|---|
+| `can.{h,cpp}` | TWAI transport, heartbeat, time-sync slave, field ingest |
+| `can_frames.h` | Pure codec for every §8 frame |
+| `clap_txn.h` | Pure transaction machine — stage, validate, apply |
+| `mode_state.h` | Pure §8.5 display-mode arbitration |
+| `text_fit.h` | Pure wrapping, ellipsis, alignment |
+| `region.h` | Pure template region model + validation |
+| `framebuffer.{h,cpp}` | 48 KB PSRAM `Adafruit_GFX` surface with a clip rect |
+| `text_render.{h,cpp}` | GFX font table, advance tables, `draw_field` |
+| `template_wire.h` | Pure codec for the 48,100-byte template upload |
+| `template_store.{h,cpp}` | LittleFS `/templates/`, atomic writes |
+| `slate.{h,cpp}` | Field values, active template, mode driver, `/slate` |
+| `tools/export_gfx_metrics.py` | Generates `web/src/editor/fontMetrics.ts` |
+| `web/src/editor/canField.ts` | TS mirror of `text_fit.h` for the preview |
+| `web/src/editor/templateExport.ts` | TS mirror of `template_wire.h` |
+
+Two documents are load-bearing and did not exist before Part II:
 
 - **[docs/protocol.md](docs/protocol.md) §8** — the CAN wire contract.
   Cross-repository: the peer lives in the Jugglebot tree, so neither

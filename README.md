@@ -1,6 +1,8 @@
 # Electronic Clapboard
 
-A DIY electronic clapboard (film slate) for multi-camera sync: typed scene/take labels on a sunlight-readable e-paper display, a high-power LED flash + solenoid strike for simultaneous visual/audio sync, and accurate timestamping for post-production alignment.
+A DIY electronic clapboard (film slate) for multi-camera sync: scene/take labels on a sunlight-readable e-paper display, a high-power LED flash for visual sync, and accurate timestamping for post-production alignment.
+
+As of Part II of the [build plan](docs/phased-build-plan.md) it is a **peripheral on the Jugglebot robot's CAN harness**: layouts are authored in the browser editor over Wi-Fi, and a ROS2 action pushes per-take field values over CAN3 at runtime. Audio sync (a solenoid strike) was cut and is a v2 candidate.
 
 See [CLAUDE.md](CLAUDE.md) for the full project overview and code standards.
 
@@ -8,8 +10,9 @@ See [CLAUDE.md](CLAUDE.md) for the full project overview and code standards.
 
 - **MCU:** ESP32-S3-DevKitC-1 (N16R8 — 16 MB flash, 8 MB PSRAM)
 - **Display:** Waveshare 7.5" V2 e-paper, SPI
-- **Sync:** 12V LED + 12V solenoid, each switched by an IRLZ44N logic-level N-MOSFET
-- **Power:** 3S LiPo (11.1V nominal), buck regulator → 5V rail for the MCU
+- **Sync:** 12V LED module switched by an IRLZ44N logic-level N-MOSFET
+- **Bus:** SN65HVD230 transceiver on the Jugglebot CAN3 drop, 1 Mbps classic CAN
+- **Power:** Jugglebot 12V harness (shared with the Jetson) → buck → 5V rail. Hard budget < 0.5 A; measured worst case 0.43 A.
 
 Full wiring is in [docs/wiring-guide.md](docs/wiring-guide.md). Follow the phased build — don't skip the standalone MOSFET tests.
 
@@ -136,7 +139,7 @@ nc clapboard.local 23
 # or:  telnet clapboard.local 23
 ```
 
-The `nc clapboard.local 23` tail is the workaround for "USB serial is unreachable" — useful when the device is on battery, behind a USB isolator, or otherwise out of reach. New connections see the last ~8 KB of buffered logs replayed first, then live lines. Caveat: this stream cannot capture firmware **panics** — when the chip throws, the network stack goes down before the panic message escapes. Use USB serial for crash investigation. The endpoint is documented in [protocol.md](docs/protocol.md) §2.4 as informational/dev-only.
+The `nc clapboard.local 23` tail is the workaround for "USB serial is unreachable" — useful when the device is installed on the robot, behind a USB isolator, or otherwise out of reach. New connections see the last ~8 KB of buffered logs replayed first, then live lines. Caveat: this stream cannot capture firmware **panics** — when the chip throws, the network stack goes down before the panic message escapes. Use USB serial for crash investigation. The endpoint is documented in [protocol.md](docs/protocol.md) §2.4 as informational/dev-only.
 
 **Windows mDNS gotcha:** Windows 10/11 without Bonjour or iTunes installed often fails to resolve `*.local` names reliably. If `ping clapboard.local` doesn't answer, fall back to the raw DHCP IP (printed on the serial monitor at boot). The browser editor will accept either.
 
