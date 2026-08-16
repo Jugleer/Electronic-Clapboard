@@ -137,36 +137,56 @@ DrawResult draw_field(const region::Region& r, const char* text) {
     const FontMetrics& m  = g_metrics[fi];
     const FontDef&     fd = FONTS[fi];
 
-    const text_fit::FitResult fitres =
-        text_fit::fit(text, /*max_chars=*/UINT8_MAX, r.w, m.advances);
+    const text_fit::WrapResult wr =
+        text_fit::wrap(text, /*max_chars=*/UINT8_MAX, r.w, r.h,
+                       m.line_h, m.ascent, m.descent, m.advances);
 
-    const int16_t dx = text_fit::h_offset(fitres.pixel_width, r.w, r.halign);
-    const int16_t dy = text_fit::v_baseline(r.h, r.valign, m.ascent, m.descent);
+    const int16_t first_baseline = text_fit::v_block_baseline(
+        r.h, r.valign, m.ascent, m.descent, wr.line_count, m.line_h);
 
     c.setFont(fd.font);
     c.setTextSize(fd.size);
     c.setTextColor(ink);          // one-arg form: no background fill, we wiped already
-    c.setTextWrap(false);
-    c.setCursor((int16_t)(r.x + dx), (int16_t)(r.y + dy));
+    c.setTextWrap(false);         // GFX's own wrap is at the panel edge, not the box
 
-    // Write the fitted prefix character by character, substituting anything
-    // the font can't render. Going through write() rather than print() keeps
-    // the substitution in one place and avoids a temporary String.
-    for (uint8_t i = 0; i < fitres.draw_len; ++i) {
-        const char raw = text[i];
-        const char ch  = (glyph_for(fd.font, raw) != nullptr)
-                             ? raw : text_fit::SUBSTITUTE;
-        c.write((uint8_t) ch);
-    }
-    if (fitres.ellipsis) {
-        for (uint8_t i = 0; i < text_fit::ELLIPSIS_CHARS; ++i) {
-            c.write((uint8_t) text_fit::ELLIPSIS[i]);
+    // Confine drawing to the region for the duration. Without this a font
+    // taller than its box paints descenders over the field below, and with
+    // wrapping that stops being a corner case — a box one line short spills
+    // an entire line. Restored before returning so the next caller (and the
+    // background blit) sees an unclipped canvas.
+    c.set_clip(r.x, r.y, (int16_t) r.w, (int16_t) r.h);
+
+    uint16_t widest = 0;
+    for (uint8_t li = 0; li < wr.line_count; ++li) {
+        const text_fit::Line& ln = wr.lines[li];
+        if (ln.width > widest) widest = ln.width;
+
+        const int16_t dx = text_fit::h_offset(ln.width, r.w, r.halign);
+        const int16_t by = (int16_t)(first_baseline + (int16_t)(li * m.line_h));
+        c.setCursor((int16_t)(r.x + dx), (int16_t)(r.y + by));
+
+        // Character by character, substituting anything the font can't
+        // render. write() rather than print() keeps the substitution in one
+        // place and avoids a temporary String.
+        for (uint8_t i = 0; i < ln.len; ++i) {
+            const char raw = text[ln.start + i];
+            const char ch  = (glyph_for(fd.font, raw) != nullptr)
+                                 ? raw : text_fit::SUBSTITUTE;
+            c.write((uint8_t) ch);
+        }
+        if (ln.ellipsis) {
+            for (uint8_t i = 0; i < text_fit::ELLIPSIS_CHARS; ++i) {
+                c.write((uint8_t) text_fit::ELLIPSIS[i]);
+            }
         }
     }
 
+    c.clear_clip();
+
     out.drawn       = true;
-    out.overflowed  = fitres.overflowed;
-    out.pixel_width = fitres.pixel_width;
+    out.overflowed  = wr.overflowed;
+    out.pixel_width = widest;
+    out.line_count  = wr.line_count;
     return out;
 }
 
@@ -185,9 +205,10 @@ void draw_all(const region::Template& t,
             // Worth a log line: it means an authored box is too small for
             // real data, which is invisible on the panel apart from the
             // ellipsis and easy to miss during a shoot.
-            clap_log("[text] field %u overflowed its %ux%u region (drew %u px)",
+            clap_log("[text] field %u overflowed its %ux%u region "
+                     "(%u lines, widest %u px)",
                      (unsigned) r.field_id, (unsigned) r.w, (unsigned) r.h,
-                     (unsigned) res.pixel_width);
+                     (unsigned) res.line_count, (unsigned) res.pixel_width);
         }
     }
 }

@@ -41,11 +41,17 @@ const FontMetrics& metrics(region::FontId id);
 struct DrawResult {
     bool     drawn;        // false if the region was invalid or fonts aren't up
     bool     overflowed;   // text did not fit and was truncated
-    uint16_t pixel_width;  // width actually drawn
+    uint16_t pixel_width;  // width of the widest line drawn
+    uint8_t  line_count;   // lines the value wrapped onto
 };
 
 // Draw `text` into `r` on the composite framebuffer. Assumes the background
 // has already been blitted; this only paints the region.
+//
+// Wraps at the box width and continues onto further lines until the next
+// would not fit vertically; the ellipsis appears only when both dimensions
+// are exhausted. Drawing is clipped to the region, so a font taller than its
+// box degrades to cut glyphs rather than painting over its neighbours.
 //
 // Clears the box to paper (or fills it with ink when r.invert) before
 // drawing, so a shorter value cannot leave fragments of a longer previous

@@ -18,7 +18,7 @@
 
 import type { JSX } from "react";
 
-import { fit, fontLabel } from "./canField";
+import { fontLabel, wrap } from "./canField";
 import { GFX_FONTS } from "./fontMetrics";
 import { useEditorStore } from "./store";
 import { usePalette } from "./themeStore";
@@ -64,9 +64,12 @@ export function CanFieldControls({
   }
 
   const preview = isField
-    ? fit(element.text, Math.round(element.w), fontId)
+    ? wrap(element.text, Math.round(element.w), Math.round(element.h), fontId)
     : null;
 
+  // A single line not fitting vertically is the interesting case: with
+  // wrapping, a box one line short silently drops content rather than
+  // visibly clipping, so it is worth calling out separately from overflow.
   const tooTall = GFX_FONTS[fontId].ascent + GFX_FONTS[fontId].descent > element.h;
 
   return (
@@ -154,22 +157,38 @@ export function CanFieldControls({
           ) : null}
 
           {preview ? (
-            <div
-              style={{
-                fontSize: 11,
-                color: preview.overflowed ? palette.statusWarn : palette.textMuted,
-              }}
-            >
-              {preview.overflowed ? (
-                <>
-                  Overflows {Math.round(element.w)}px — panel will show:{" "}
-                  <code style={{ color: palette.text }}>{preview.rendered}</code>
-                </>
-              ) : (
-                <>
-                  Fits: {preview.pixelWidth}px of {Math.round(element.w)}px
-                </>
-              )}
+            <div style={{ fontSize: 11 }}>
+              <div
+                style={{
+                  color: preview.overflowed
+                    ? palette.statusWarn
+                    : palette.textMuted,
+                }}
+              >
+                {preview.overflowed
+                  ? `Overflows — ${preview.lines.length} line${
+                      preview.lines.length === 1 ? "" : "s"
+                    } fit, rest truncated. Panel will show:`
+                  : `Fits on ${preview.lines.length} line${
+                      preview.lines.length === 1 ? "" : "s"
+                    } (${preview.blockHeight}px of ${Math.round(element.h)}px tall). Panel will show:`}
+              </div>
+              {/* Line-for-line, because with wrapping the useful question is
+                  "where does it break", not just "does it fit". */}
+              <pre
+                style={{
+                  margin: "3px 0 0",
+                  padding: "3px 5px",
+                  border: `1px solid ${palette.buttonBorder}`,
+                  color: palette.text,
+                  whiteSpace: "pre-wrap",
+                  fontSize: 11,
+                }}
+              >
+                {preview.lines.length > 0
+                  ? preview.lines.map((l) => l.text).join("\n")
+                  : "(empty)"}
+              </pre>
             </div>
           ) : null}
 

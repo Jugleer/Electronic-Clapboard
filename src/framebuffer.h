@@ -51,8 +51,23 @@ public:
 
     uint8_t* buffer() { return buf_; }
 
+    // Restrict all subsequent drawing to a rectangle. Adafruit_GFX has no
+    // clipping of its own, so without this a field whose font is taller than
+    // its box paints its descenders over whatever sits below — and with
+    // multi-line wrapping that stops being a corner case, since a box one
+    // line too short now spills a whole line rather than a few pixels.
+    //
+    // Clipping at drawPixel rather than pre-measuring means it holds for
+    // every primitive, including glyph bitmaps we do not rasterise ourselves.
+    void set_clip(int16_t x, int16_t y, int16_t w, int16_t h);
+    void clear_clip();
+
 private:
     uint8_t* buf_;
+    int16_t  clip_x0_ = 0;
+    int16_t  clip_y0_ = 0;
+    int16_t  clip_x1_ = (int16_t) WIDTH  - 1;   // inclusive
+    int16_t  clip_y1_ = (int16_t) HEIGHT - 1;
 };
 
 // Allocate the PSRAM buffer. Call once from setup(), after logging is up.

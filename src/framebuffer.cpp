@@ -24,6 +24,26 @@ inline bool in_bounds(int16_t x, int16_t y) {
 
 }  // namespace
 
+void Canvas1::set_clip(int16_t x, int16_t y, int16_t w, int16_t h) {
+    // Intersect with the panel so a caller cannot widen the clip beyond the
+    // buffer by passing a generous rectangle.
+    clip_x0_ = x < 0 ? 0 : x;
+    clip_y0_ = y < 0 ? 0 : y;
+    int32_t x1 = (int32_t) x + w - 1;
+    int32_t y1 = (int32_t) y + h - 1;
+    if (x1 > (int32_t) WIDTH  - 1) x1 = (int32_t) WIDTH  - 1;
+    if (y1 > (int32_t) HEIGHT - 1) y1 = (int32_t) HEIGHT - 1;
+    clip_x1_ = (int16_t) x1;
+    clip_y1_ = (int16_t) y1;
+}
+
+void Canvas1::clear_clip() {
+    clip_x0_ = 0;
+    clip_y0_ = 0;
+    clip_x1_ = (int16_t) WIDTH  - 1;
+    clip_y1_ = (int16_t) HEIGHT - 1;
+}
+
 void Canvas1::drawPixel(int16_t x, int16_t y, uint16_t color) {
     // Adafruit_GFX applies rotation via getRotation(); we never rotate, so
     // the coordinates arrive panel-native. Bounds-check anyway: text drawn
@@ -31,6 +51,7 @@ void Canvas1::drawPixel(int16_t x, int16_t y, uint16_t color) {
     // silently clipping is exactly the behaviour the fixed-size/clip model
     // promises.
     if (!in_bounds(x, y)) return;
+    if (x < clip_x0_ || x > clip_x1_ || y < clip_y0_ || y > clip_y1_) return;
 
     uint8_t* p = buf_ + (uint32_t) y * BYTES_ROW + (uint32_t)(x >> 3);
     const uint8_t mask = (uint8_t)(0x80 >> (x & 7));   // MSB = leftmost pixel
@@ -39,14 +60,27 @@ void Canvas1::drawPixel(int16_t x, int16_t y, uint16_t color) {
 }
 
 void Canvas1::fillScreen(uint16_t color) {
-    memset(buf_, color ? 0xFF : 0x00, TOTAL_BYTES);
+    // The memset shortcut is only valid with no clip in force; otherwise it
+    // would paint straight through one. These three overrides all bypass
+    // drawPixel for speed, so each has to honour the clip itself.
+    const bool full = clip_x0_ == 0 && clip_y0_ == 0 &&
+                      clip_x1_ == (int16_t) WIDTH - 1 &&
+                      clip_y1_ == (int16_t) HEIGHT - 1;
+    if (full) {
+        memset(buf_, color ? 0xFF : 0x00, TOTAL_BYTES);
+        return;
+    }
+    fillRect(0, 0, (int16_t) WIDTH, (int16_t) HEIGHT, color);
 }
 
 void Canvas1::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
-    if (y < 0 || y >= (int16_t) HEIGHT || w <= 0) return;
-    if (x < 0) { w += x; x = 0; }
-    if (x >= (int16_t) WIDTH) return;
-    if (x + w > (int16_t) WIDTH) w = (int16_t) WIDTH - x;
+    // Clamp against the clip rect, which set_clip() has already intersected
+    // with the panel — so this covers both bounds checks at once.
+    if (w <= 0) return;
+    if (y < clip_y0_ || y > clip_y1_) return;
+    if (x < clip_x0_) { w += (x - clip_x0_); x = clip_x0_; }
+    if (x > clip_x1_) return;
+    if (x + w - 1 > clip_x1_) w = (int16_t)(clip_x1_ - x + 1);
     if (w <= 0) return;
 
     uint8_t* row = buf_ + (uint32_t) y * BYTES_ROW;
@@ -75,10 +109,11 @@ void Canvas1::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
 }
 
 void Canvas1::drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
-    if (x < 0 || x >= (int16_t) WIDTH || h <= 0) return;
-    if (y < 0) { h += y; y = 0; }
-    if (y >= (int16_t) HEIGHT) return;
-    if (y + h > (int16_t) HEIGHT) h = (int16_t) HEIGHT - y;
+    if (h <= 0) return;
+    if (x < clip_x0_ || x > clip_x1_) return;
+    if (y < clip_y0_) { h += (y - clip_y0_); y = clip_y0_; }
+    if (y > clip_y1_) return;
+    if (y + h - 1 > clip_y1_) h = (int16_t)(clip_y1_ - y + 1);
     if (h <= 0) return;
 
     const uint8_t mask = (uint8_t)(0x80 >> (x & 7));
@@ -91,8 +126,10 @@ void Canvas1::drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
 
 void Canvas1::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
     if (w <= 0 || h <= 0) return;
-    if (y < 0) { h += y; y = 0; }
-    if (y + h > (int16_t) HEIGHT) h = (int16_t) HEIGHT - y;
+    // Row clamping only — drawFastHLine handles the horizontal clip.
+    if (y < clip_y0_) { h += (y - clip_y0_); y = clip_y0_; }
+    if (y + h - 1 > clip_y1_) h = (int16_t)(clip_y1_ - y + 1);
+    if (h <= 0) return;
     for (int16_t i = 0; i < h; ++i) {
         drawFastHLine(x, (int16_t)(y + i), w, color);
     }

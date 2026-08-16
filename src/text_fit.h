@@ -150,7 +150,157 @@ inline int16_t h_offset(uint16_t drawn_w, uint16_t region_w, HAlign a) {
     }
 }
 
-// Y offset of the text BASELINE within a region of `region_h`.
+// ── Multi-line wrapping ───────────────────────────────────────────────────
+//
+// A field wraps at its box width and keeps going down until the NEXT line
+// would not fit vertically. Only when both dimensions are exhausted does the
+// ellipsis appear, on the final line.
+//
+// Word-boundary breaks are preferred; a single word wider than the box falls
+// back to breaking mid-word, because otherwise it can never be placed and
+// the field renders empty — the failure Phase 14 already rejected on the
+// grounds that a blank region reads as "no data", which is a false statement
+// rather than an incomplete one.
+
+// Ceiling on lines per field. 32 characters cannot legitimately wrap past
+// this: it would need a box under ~3 characters wide, which is degenerate
+// authoring. Overflow past the cap is treated as "ran out of vertical
+// space", which is the correct outcome anyway.
+constexpr uint8_t MAX_LINES = 12;
+
+struct Line {
+    uint8_t  start;     // index into the source string
+    uint8_t  len;       // characters on this line, trailing spaces trimmed
+    uint16_t width;     // pixel width including the ellipsis if present
+    bool     ellipsis;  // this line ends with ELLIPSIS
+};
+
+struct WrapResult {
+    uint8_t  line_count;
+    Line     lines[MAX_LINES];
+    bool     overflowed;    // text remained after the last placed line
+    uint16_t block_height;  // ascent + descent + (line_count-1) * line_height
+};
+
+// Lay `s` out inside a `max_w` × `max_h` box.
+//
+// `line_height` is the font's line advance. `ascent`/`descent` are needed
+// for the block height, which vertical alignment depends on.
+//
+// An explicit '\n' forces a break. Handling it here rather than letting it
+// fall through to advance_of() matters: '\n' is outside printable ASCII, so
+// the substitution rule would otherwise render it as a literal '?'.
+inline WrapResult wrap(const char* s, uint8_t max_chars,
+                       uint16_t max_w, uint16_t max_h,
+                       uint8_t line_height, uint8_t ascent, uint8_t descent,
+                       const uint16_t* adv) {
+    WrapResult r{};
+    const uint8_t len = str_len(s, max_chars);
+
+    uint8_t max_lines = (line_height > 0)
+                            ? (uint8_t)(max_h / line_height)
+                            : (uint8_t) 1;
+    // A box shorter than one line still gets one line, clipped by the
+    // caller's clip rect. Same reasoning as the too-narrow case.
+    if (max_lines == 0)          max_lines = 1;
+    if (max_lines > MAX_LINES)   max_lines = MAX_LINES;
+
+    uint8_t i = 0;
+    while (i < len && r.line_count < max_lines) {
+        // Whitespace at a wrap point is an artefact of the break, not
+        // content — leading spaces on line 2 would look like a stray indent.
+        // Line 0 keeps its leading spaces; those came from the operator.
+        if (r.line_count > 0) {
+            while (i < len && s[i] == ' ') ++i;
+            if (i >= len) break;
+        }
+
+        const uint8_t line_start = i;
+        uint16_t w        = 0;
+        uint8_t  n        = 0;
+        uint8_t  break_at = 0;   // chars to take for a word-boundary break
+        uint16_t break_w  = 0;
+        bool     hard_nl  = false;
+
+        while (line_start + n < len) {
+            const char c = s[line_start + n];
+            if (c == '\n') { hard_nl = true; break; }
+            const uint16_t a = advance_of(c, adv);
+            if (w + a > max_w) break;
+            w = (uint16_t)(w + a);
+            ++n;
+            if (c == ' ') { break_at = n; break_w = w; }
+        }
+
+        const bool reached_end = (line_start + n >= len) || hard_nl;
+
+        uint8_t  take   = n;
+        uint16_t take_w = w;
+        if (!reached_end) {
+            if (break_at > 0) {
+                // Word wrap.
+                take   = break_at;
+                take_w = break_w;
+            } else if (n == 0) {
+                // Not even one glyph fits. Take one anyway: zero would spin
+                // this loop forever, and the clip rect stops it escaping.
+                take   = 1;
+                take_w = advance_of(s[line_start], adv);
+            }
+            // else: an over-long word — break mid-word at `n`.
+        }
+
+        // Trim trailing spaces so they don't skew centring or right-align.
+        uint8_t  trimmed   = take;
+        uint16_t trimmed_w = take_w;
+        while (trimmed > 0 && s[line_start + trimmed - 1] == ' ') {
+            --trimmed;
+            trimmed_w = (uint16_t)(trimmed_w - advance_of(s[line_start + trimmed], adv));
+        }
+
+        r.lines[r.line_count].start    = line_start;
+        r.lines[r.line_count].len      = trimmed;
+        r.lines[r.line_count].width    = trimmed_w;
+        r.lines[r.line_count].ellipsis = false;
+        ++r.line_count;
+
+        i = (uint8_t)(line_start + take);
+        if (hard_nl) ++i;   // consume the newline itself
+    }
+
+    // Is anything left? Trailing whitespace is not content, so a value
+    // ending in spaces must not report an overflow.
+    uint8_t rest = i;
+    while (rest < len && (s[rest] == ' ' || s[rest] == '\n')) ++rest;
+    r.overflowed = (rest < len);
+
+    if (r.overflowed && r.line_count > 0) {
+        Line& last = r.lines[r.line_count - 1];
+        const uint16_t ell_w = measure(ELLIPSIS, ELLIPSIS_CHARS, adv);
+        if (ell_w <= max_w) {
+            // Shrink the final line until content + ellipsis fits.
+            uint16_t w2 = last.width;
+            uint8_t  n2 = last.len;
+            while (n2 > 0 && (uint16_t)(w2 + ell_w) > max_w) {
+                --n2;
+                w2 = (uint16_t)(w2 - advance_of(s[last.start + n2], adv));
+            }
+            last.len      = n2;
+            last.width    = (uint16_t)(w2 + ell_w);
+            last.ellipsis = true;
+        }
+        // else: too narrow for even the ellipsis — leave the hard truncation
+        // in place, per the same rule single-line fit() applies.
+    }
+
+    r.block_height = (r.line_count == 0)
+                         ? 0
+                         : (uint16_t)(ascent + descent +
+                                      (uint16_t)(r.line_count - 1) * line_height);
+    return r;
+}
+
+// Y offset of the FIRST line's baseline within a region of `region_h`.
 //
 // GFX custom fonts position glyphs relative to a baseline, not a top edge,
 // so every vertical alignment resolves to "where does the baseline go".
@@ -159,17 +309,28 @@ inline int16_t h_offset(uint16_t drawn_w, uint16_t region_w, HAlign a) {
 // containing "xyz" aligns identically to one containing "XYZ". Using the
 // string's own extents would make fields visibly jump as their content
 // changed, which on a slate looks like a rendering fault.
+inline int16_t v_block_baseline(uint16_t region_h, VAlign a,
+                                uint8_t ascent, uint8_t descent,
+                                uint8_t line_count, uint8_t line_height) {
+    if (line_count == 0) line_count = 1;
+    const int32_t block_h = (int32_t) ascent + descent +
+                            (int32_t)(line_count - 1) * line_height;
+    switch (a) {
+        case VAlign::Middle:
+            return (int16_t)(((int32_t) region_h - block_h) / 2 + ascent);
+        case VAlign::Bottom:
+            return (int16_t)((int32_t) region_h - block_h + ascent);
+        case VAlign::Top:
+        default:
+            return (int16_t) ascent;
+    }
+}
+
+// Single-line convenience wrapper, kept because the one-line case is still
+// the common one and reads better at call sites than passing line_count=1.
 inline int16_t v_baseline(uint16_t region_h, VAlign a,
                           uint8_t ascent, uint8_t descent) {
-    switch (a) {
-        case VAlign::Middle: {
-            const int32_t text_h = (int32_t) ascent + descent;
-            return (int16_t)(((int32_t) region_h - text_h) / 2 + ascent);
-        }
-        case VAlign::Bottom: return (int16_t)((int32_t) region_h - descent);
-        case VAlign::Top:
-        default:             return (int16_t) ascent;
-    }
+    return v_block_baseline(region_h, a, ascent, descent, 1, 0);
 }
 
 }  // namespace text_fit

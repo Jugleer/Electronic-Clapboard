@@ -275,6 +275,146 @@ static void test_empty_template_is_valid() {
     TEST_ASSERT_TRUE(region::is_valid(t));
 }
 
+// ── multi-line wrapping ───────────────────────────────────────────────────
+//
+// Fixture font: 10 px advance, 20 px line height, ascent 15, descent 5. So a
+// 60 px box is exactly 3 lines and 6 characters wide, which keeps every
+// assertion arithmetic-obvious.
+constexpr uint8_t  LH   = 20;
+constexpr uint8_t  ASC  = 15;
+constexpr uint8_t  DESC = 5;
+
+static std::string line_text(const char* src, const Line& l) {
+    std::string s(src + l.start, src + l.start + l.len);
+    if (l.ellipsis) s += ELLIPSIS;
+    return s;
+}
+
+static void test_wrap_breaks_at_word_boundaries() {
+    const char* s = "SCENE FOUR TAKE";
+    const WrapResult r = wrap(s, UINT8_MAX, 60, 60, LH, ASC, DESC, g_mono);
+
+    TEST_ASSERT_EQUAL_UINT8(3, r.line_count);
+    TEST_ASSERT_FALSE(r.overflowed);
+    TEST_ASSERT_EQUAL_STRING("SCENE", line_text(s, r.lines[0]).c_str());
+    TEST_ASSERT_EQUAL_STRING("FOUR",  line_text(s, r.lines[1]).c_str());
+    TEST_ASSERT_EQUAL_STRING("TAKE",  line_text(s, r.lines[2]).c_str());
+}
+
+static void test_wrap_swallows_the_space_at_a_break() {
+    // A leading space on line 2 would render as a stray indent.
+    const char* s = "AB CD";
+    const WrapResult r = wrap(s, UINT8_MAX, 20, 60, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_EQUAL_UINT8(2, r.line_count);
+    TEST_ASSERT_EQUAL_STRING("AB", line_text(s, r.lines[0]).c_str());
+    TEST_ASSERT_EQUAL_STRING("CD", line_text(s, r.lines[1]).c_str());
+}
+
+static void test_ellipsis_only_once_both_dimensions_are_exhausted() {
+    // The headline requirement: text keeps flowing onto new lines, and the
+    // ellipsis appears only when there is no more vertical room either.
+    const char* s = "AAAA BBBB CCCC DDDD";
+
+    // Tall enough for all four words — no ellipsis despite not fitting on
+    // one line.
+    const WrapResult tall = wrap(s, UINT8_MAX, 50, 100, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_FALSE(tall.overflowed);
+    TEST_ASSERT_EQUAL_UINT8(4, tall.line_count);
+
+    // Two lines' worth of height — now it must ellipsise on the last line.
+    const WrapResult shortbox = wrap(s, UINT8_MAX, 50, 40, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_TRUE(shortbox.overflowed);
+    TEST_ASSERT_EQUAL_UINT8(2, shortbox.line_count);
+    TEST_ASSERT_FALSE(shortbox.lines[0].ellipsis);
+    TEST_ASSERT_TRUE(shortbox.lines[1].ellipsis);
+    TEST_ASSERT_EQUAL_STRING("AAAA", line_text(s, shortbox.lines[0]).c_str());
+    TEST_ASSERT_EQUAL_STRING("BB...", line_text(s, shortbox.lines[1]).c_str());
+}
+
+static void test_wrap_breaks_an_overlong_word_mid_word() {
+    // A word wider than the box can never be placed on a boundary. Dropping
+    // it would leave the field empty, which is the failure the whole
+    // clip-not-blank rule exists to avoid.
+    const char* s = "SUPERCALIFRAGILISTIC";
+    const WrapResult r = wrap(s, UINT8_MAX, 50, 40, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_EQUAL_UINT8(2, r.line_count);
+    TEST_ASSERT_EQUAL_STRING("SUPER", line_text(s, r.lines[0]).c_str());
+    TEST_ASSERT_TRUE(r.overflowed);
+}
+
+static void test_explicit_newline_forces_a_break() {
+    // '\n' is outside printable ASCII, so without special handling the
+    // substitution rule would render it as a literal '?'.
+    const char* s = "AB\nCD";
+    const WrapResult r = wrap(s, UINT8_MAX, 100, 60, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_EQUAL_UINT8(2, r.line_count);
+    TEST_ASSERT_EQUAL_STRING("AB", line_text(s, r.lines[0]).c_str());
+    TEST_ASSERT_EQUAL_STRING("CD", line_text(s, r.lines[1]).c_str());
+    TEST_ASSERT_FALSE(r.overflowed);
+}
+
+static void test_trailing_whitespace_is_not_an_overflow() {
+    const char* s = "AB   ";
+    const WrapResult r = wrap(s, UINT8_MAX, 40, 20, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_FALSE(r.overflowed);
+    TEST_ASSERT_EQUAL_UINT8(1, r.line_count);
+    // Trailing spaces must not skew the width, or centring drifts right.
+    TEST_ASSERT_EQUAL_UINT16(20, r.lines[0].width);
+}
+
+static void test_box_shorter_than_one_line_still_draws_one() {
+    // Clipped by the caller's clip rect. Blank would read as "no data".
+    const WrapResult r = wrap("HELLO", UINT8_MAX, 100, 5, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_EQUAL_UINT8(1, r.line_count);
+}
+
+static void test_wrap_never_exceeds_the_box_width() {
+    // Sweep: whatever any line reports drawing must fit horizontally.
+    const char* s = "The quick brown fox jumps over";
+    for (uint16_t w = 10; w <= 200; w += 5) {
+        const WrapResult r = wrap(s, UINT8_MAX, w, 200, LH, ASC, DESC, g_mono);
+        for (uint8_t i = 0; i < r.line_count; ++i) {
+            TEST_ASSERT_TRUE_MESSAGE(r.lines[i].width <= w,
+                                     "wrapped line wider than its box");
+        }
+    }
+}
+
+static void test_wrap_line_count_never_exceeds_the_cap() {
+    // A pathologically narrow box must terminate, not spin or overrun the
+    // fixed lines[] array.
+    const WrapResult r = wrap("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456",
+                              UINT8_MAX, 5, 10000, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_TRUE(r.line_count <= MAX_LINES);
+    TEST_ASSERT_TRUE(r.overflowed);
+}
+
+static void test_block_height_matches_the_line_count() {
+    const WrapResult r = wrap("AAAA BBBB CCCC", UINT8_MAX, 50, 100, LH, ASC, DESC, g_mono);
+    TEST_ASSERT_EQUAL_UINT8(3, r.line_count);
+    // ascent + descent + (3-1) * lineHeight = 15 + 5 + 40
+    TEST_ASSERT_EQUAL_UINT16(60, r.block_height);
+}
+
+static void test_block_baseline_positions_all_three_alignments() {
+    // Two lines: block is 15 + 5 + 20 = 40 tall in a 100 px box.
+    TEST_ASSERT_EQUAL_INT16(15, v_block_baseline(100, VAlign::Top, ASC, DESC, 2, LH));
+    // Middle: (100-40)/2 + 15 = 30 + 15
+    TEST_ASSERT_EQUAL_INT16(45, v_block_baseline(100, VAlign::Middle, ASC, DESC, 2, LH));
+    // Bottom: 100 - 40 + 15
+    TEST_ASSERT_EQUAL_INT16(75, v_block_baseline(100, VAlign::Bottom, ASC, DESC, 2, LH));
+}
+
+static void test_single_line_block_baseline_matches_the_old_helper() {
+    // v_baseline() is now a wrapper; a regression here would silently shift
+    // every existing single-line field.
+    for (uint8_t a = 0; a < 3; ++a) {
+        const VAlign va = (VAlign) a;
+        TEST_ASSERT_EQUAL_INT16(v_baseline(100, va, 30, 8),
+                                v_block_baseline(100, va, 30, 8, 1, 0));
+    }
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_measure_sums_advances);
@@ -299,5 +439,17 @@ int main(int, char**) {
     RUN_TEST(test_template_rejects_duplicate_field_ids);
     RUN_TEST(test_template_find_by_field_id);
     RUN_TEST(test_empty_template_is_valid);
+    RUN_TEST(test_wrap_breaks_at_word_boundaries);
+    RUN_TEST(test_wrap_swallows_the_space_at_a_break);
+    RUN_TEST(test_ellipsis_only_once_both_dimensions_are_exhausted);
+    RUN_TEST(test_wrap_breaks_an_overlong_word_mid_word);
+    RUN_TEST(test_explicit_newline_forces_a_break);
+    RUN_TEST(test_trailing_whitespace_is_not_an_overflow);
+    RUN_TEST(test_box_shorter_than_one_line_still_draws_one);
+    RUN_TEST(test_wrap_never_exceeds_the_box_width);
+    RUN_TEST(test_wrap_line_count_never_exceeds_the_cap);
+    RUN_TEST(test_block_height_matches_the_line_count);
+    RUN_TEST(test_block_baseline_positions_all_three_alignments);
+    RUN_TEST(test_single_line_block_baseline_matches_the_old_helper);
     return UNITY_END();
 }

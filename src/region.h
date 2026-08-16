@@ -44,7 +44,16 @@ enum class FontId : uint8_t {
     SansBold18   = 3,
     SansBold24   = 4,   // default body
     SansBold24x2 = 5,   // hero fields (~68 px)
-    MonoBold18   = 6,   // numerics — fixed advance stops take numbers jittering
+    // Numerics. A fixed advance stops a take counter jittering sideways as
+    // it counts up, which on a slate reads as the panel being unstable.
+    //
+    // Caveat found while generating the editor's metrics table: Adafruit's
+    // FreeMonoBold18pt7b is not perfectly monospaced — lowercase 'q' is
+    // 22 px against 21 for every other glyph, evidently a rounding artefact
+    // in their font conversion. Digits and uppercase are all 21, so the
+    // anti-jitter property holds for what this font is actually for.
+    // FreeMonoBold24pt7b has no such outlier.
+    MonoBold18   = 6,
     MonoBold24   = 7,
     _Count       = 8,
 };
