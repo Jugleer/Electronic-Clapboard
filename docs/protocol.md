@@ -970,23 +970,61 @@ exists.
 | Date | autofilled on Scene entry into field 0 | Do **not** send it. The device derives it from `0x7DD`, and sending one races the clock the bridge is already distributing. A CAN value does override it if a shoot needs that. |
 | Scene entry | clears **all** fields | The first commit after a link comes back starts from blank, not from the previous session's values |
 
-### 8.11 Bench injection (no Teensy required)
+### 8.11 Bench validation runbook (no Teensy required)
 
-Scene mode needs `CLAP_LINK` UP **and** a fresh time anchor, both periodic.
-To exercise the clapboard before the bridge-side work lands, inject:
+**This is the outstanding validation for Phases 16 and 17.** Both build and
+their pure logic is unit-tested, but neither has seen a real frame — they
+depend on `CLAP_LINK`, which the bridge does not send yet. Everything below
+can be driven from a USB-CAN adapter with periodic-TX support (SavvyCAN,
+python-can, CANable). All frames are standard 11-bit ID, DLC 8.
+
+**The prerequisite that otherwise wastes an hour:** scene mode needs
+`CLAP_LINK` UP *and* a fresh time anchor, and **both are periodic**. `0x7EA`
+must repeat faster than `LINK_STALE_MS` (3 s); `0x7DD` faster than 90 s.
 
 ```
-7EA  01 00 00 00 00 00 00 00     every 500 ms   (must beat LINK_STALE 3 s)
-7DD  <u32 sec LE><u32 usec LE>   every 1 s      (must beat 90 s; skip if the bridge is live)
+7EA  01 00 00 00 00 00 00 00     every 500 ms
+7DD  80 32 74 6A 00 00 00 00     every 1 s   (unix 1786000000; skip if the bridge is live)
 ```
 
-A worked example transaction — fields 2 and 3, template 0, txn 1:
+| # | Step | Send | Expect |
+|---|---|---|---|
+| 1 | Boot baseline | nothing | `/status` → `can.link_seen:false`, `show_scene:false`. Log `[slate] mode → screensaver`. With no slates stored the panel is **left as-is** — deliberate; a blank panel is indistinguishable from a dead device. |
+| 2 | Enter scene | the two periodic frames above | `[can] CLAP_LINK: ROS2 UP`, `[can] time anchored from 0x7DD`, `[slate] mode → scene (fields cleared, date autofilled)`, repaint |
+| 3 | Happy path | `7E8 02 53 43 20 31 34 00 00`<br>`7E8 03 54 20 30 33 00 00 00`<br>`7E9 00 0C 00 01 C7 73 00 00` | `[can] txn 1 applied: changed=0x0C`, repaint, ack `7EB 01 00 ...` outcome `0x00` |
+| 4 | **Patch semantics** | `7E8 03 54 20 30 34 00 00 00`<br>`7E9 00 08 00 02 8D E5 00 00` | Take becomes `T 04`, **scene still reads `SC 14`**. If field 2 blanks, patch semantics are broken. |
+| 5 | Multi-line wrap | `7E8 04 57 69 64 65 20 2D 20`<br>`7E8 14 70 6C 61 74 66 6F 72`<br>`7E8 24 6D 20 63 61 74 63 68`<br>`7E8 34 20 63 79 63 6C 65 00`<br>`7E9 00 10 00 03 4A CD 00 00` | `"Wide - platform catch cycle"` wraps at the box width. Compare against the editor preview — they must break at the same words. |
+| 6a | CRC mismatch | restage step 3's fields, then `7E9 00 0C 00 04 AD DE 00 00` | ack `0x02` **and the panel must not change** — proves a failed transaction applies nothing |
+| 6b | Incomplete | stage field 2 only, then `7E9 00 0C 00 05 00 00 00 00` | ack `0x03` |
+| 6c | No template | `7E9 05 0C 00 06 C7 73 00 00` | ack `0x05` |
+| 7 | Idempotent replay | resend step 3's commit **verbatim** | `[can] txn 1 replayed (idempotent)`, ack `0x00`, **no repaint**. A second repaint means a lost ack would double-render. |
+| 8 | **Link-drop safety** | `7E8 02 53 43 20 39 39 00 00`, then `7EA 00 …` (DOWN), then resume UP and commit mask `0x04` | Must be `0x03` INCOMPLETE. If it applies `SC 99`, two shots' data can merge into one slate. |
+| 9 | **Staleness backstop** | stop `0x7EA` entirely, keep `0x7DD` running | Panel drops to screensaver within ~3 s despite the last message saying UP. This is the dead-Teensy case a push-only design misses. |
+| 10 | Fire event | press the button | `7ED` with 48-bit wall-clock µs matching the injected epoch |
+| 11 | Bench regression | unplug CAN, reboot, `curl "http://clapboard.local/slate?f2=SC%2001"` | Still paints (§2.8 manual override) |
 
+Steps 4, 8 and 9 are the ones not to skip — they are the failure modes that
+would otherwise first appear during a shoot.
+
+#### Computing your own CRCs
+
+Over the concatenated 32-byte NUL-padded field buffers, ascending field id:
+
+```python
+def crc16(d):
+    c = 0xFFFF
+    for b in d:
+        c ^= b << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+    return c
+
+fields = {2: "SC 14", 3: "T 03"}
+buf = b"".join(t.encode()[:32].ljust(32, b"\0") for _, t in sorted(fields.items()))
+print(hex(crc16(buf)))        # little-endian into commit bytes 4-5
 ```
-7E8  02 53 43 20 31 34 00 00     field 2 = "SC 14"
-7E8  03 54 20 30 33 00 00 00     field 3 = "T 03"
-7E9  00 0C 00 01 C7 73 00 00     commit, mask 0x0C, crc 0x73C7
-```
+
+Chunking: `byte0 = field_id | (seq << 4)`, then 7 text bytes NUL-padded.
 
 ---
 
