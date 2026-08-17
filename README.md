@@ -38,7 +38,7 @@ bridge's `0x7DD` broadcast.
 | Phase 14b (multi-line wrap) | Built, **not hardware-validated** |
 | Phase 16 (CAN field ingest) | Built, **never seen a real CAN frame** |
 | Phase 17 (mode arbitration) | Built, **never seen a real `CLAP_LINK`** |
-| Jugglebot / Teensy side | **Not started** — this is the actual blocker |
+| Jugglebot / Teensy side | **Partially done, parked on a side branch** — see below |
 | Tests | 345 vitest across 23 files; 222 native Unity cases across 15 programs |
 
 Phases 16 and 17 are unvalidated for one reason: they both hang off
@@ -62,19 +62,43 @@ Steps 4, 8 and 9 are the ones that matter: patch semantics, link-drop safety,
 and the staleness backstop. Those are the failure modes that would otherwise
 first appear during a shoot.
 
-### 2. Implement the Jugglebot side — the real blocker
+### 2. Finish the Jugglebot side — partially done, on a side branch
 
-[docs/can-integration-handoff.md](docs/can-integration-handoff.md) is written
-to be read *by a session working in the `../Jugglebot/` repo*. It leads with
-what already exists there in your favour, because three of the five work
-items are smaller than they look — notably, the entire clapboard→Jetson
-uplink needs no new Teensy code at all, since every CAN3 frame is already
-relayed verbatim as `CONE_FRAME`.
+**Work exists and is parked.** As of 2026-08-18 the Jugglebot repo has:
 
-The five items, in suggested order: fix `cone_health` so it stops reporting a
-catching cone when a clapboard is attached; add the `CLAP_LINK` emitter;
-teach the Jetson's `CONE_FRAME` handler the new IDs; add the downlink RPC;
-build the `SetSlate` action server.
+| | |
+|---|---|
+| Branch | **`2026-08_clapboard-can3`**, pushed to origin |
+| Contents | Nine commits — Phases 0–4 implemented and self-audited, a Phase 6 doc sweep, and a resume prompt |
+| Plan document | `plans/parked/clapboard-can3-integration.md` |
+| Main dev branch | `mvp-trajectory-bringup` was reset back to `d10f999` + 1; its **only** clapboard footprint is that plan file — no code, no tests, no firmware change, no logbook entries |
+
+Resume with a worktree so the side branch does not disturb the main one:
+
+```bash
+git worktree add ~/Desktop/Jugglebot-clapboard 2026-08_clapboard-can3
+```
+
+> **Careful with the phase numbering.** "Phases 0–4" refers to that plan
+> document's own numbering, which is **not** the same as the five work items
+> in [can-integration-handoff.md](docs/can-integration-handoff.md) §3–§7.
+> Nobody on this side has verified the mapping. Read
+> `plans/parked/clapboard-can3-integration.md` first and work out what is
+> genuinely done before assuming any of the handoff items are complete.
+
+[docs/can-integration-handoff.md](docs/can-integration-handoff.md) remains the
+brief written *for* a session in that repo. It leads with what already exists
+there in your favour — notably, the entire clapboard→Jetson uplink needs no
+new Teensy code at all, since every CAN3 frame is already relayed verbatim as
+`CONE_FRAME`.
+
+The five items it specifies, in suggested order: fix `cone_health` so it stops
+reporting a catching cone when a clapboard is attached; add the `CLAP_LINK`
+emitter; teach the Jetson's `CONE_FRAME` handler the new IDs; add the downlink
+RPC; build the `SetSlate` action server.
+
+Note also that the work was **self-audited, not hardware-validated** — the
+same distinction that applies to Phases 16/17 on this side.
 
 ### 3. System integration test
 

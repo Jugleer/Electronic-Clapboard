@@ -6,6 +6,30 @@
 That document is normative; this one tells you where to put things and what
 the traps are.
 
+> ## ⏸ Both sides parked, 2026-08-18 — read this first
+>
+> **This brief is no longer a from-scratch task.** Work against it exists in
+> the Jugglebot repo and is parked on a side branch.
+>
+> | | |
+> |---|---|
+> | Branch | **`2026-08_clapboard-can3`**, pushed to origin |
+> | Contents | Nine commits — Phases 0–4 implemented and self-audited, a Phase 6 doc sweep, a resume prompt |
+> | Plan document | `plans/parked/clapboard-can3-integration.md` — **the authority on what is actually done** |
+> | Main dev branch | `mvp-trajectory-bringup` reset to `d10f999` + 1; its only clapboard footprint is that plan file. No code, tests, firmware change or logbook entries. Nothing had been pushed, so this was a pointer move rather than a history rewrite. |
+>
+> ```bash
+> git worktree add ~/Desktop/Jugglebot-clapboard 2026-08_clapboard-can3
+> ```
+>
+> **The phase numbers are not this document's.** "Phases 0–4" is that plan's
+> own numbering. It has **not** been mapped onto the five work items in §3–§7
+> below, and nobody on the clapboard side has read that branch. Treat §3–§7 as
+> a specification of what must end up true, not as a checklist with four items
+> already ticked — reconcile against the plan doc before writing anything.
+>
+> The work is described as **self-audited, not hardware-validated**.
+>
 > **Clapboard-side status: code-complete as of 2026-08-16.** Every frame in §8
 > is implemented and the firmware is on hardware. `CLAP_HEARTBEAT`,
 > `CLAP_FIRE_EVENT` and the `0x7DD` time-sync slave are hardware-validated;
@@ -311,6 +335,10 @@ relay path that the catching-cone tooling depends on.
 ---
 
 ## 9. Suggested order
+
+> **Superseded if the parked branch already covers some of this.** Reconcile
+> against `plans/parked/clapboard-can3-integration.md` before following the
+> order below — it was written assuming nothing existed.
 
 1. **§5 `cone_health`** — smallest, independent, and it makes every later
    bench observation trustworthy.

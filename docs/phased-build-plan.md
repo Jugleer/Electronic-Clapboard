@@ -2130,6 +2130,17 @@ without the Teensy.
 ## Peer-repo work (Jugglebot)
 
 Tracked separately in [can-integration-handoff.md](can-integration-handoff.md).
+
+> **Partially done and parked, 2026-08-18.** The Jugglebot repo has a pushed
+> branch `2026-08_clapboard-can3` with nine commits — Phases 0–4 implemented
+> and self-audited against `plans/parked/clapboard-can3-integration.md`, plus
+> a doc sweep and a resume prompt. Its main dev branch was reset clean of the
+> work, keeping only the plan file. Resume with
+> `git worktree add ~/Desktop/Jugglebot-clapboard 2026-08_clapboard-can3`.
+>
+> That plan's phase numbering is **not** the item numbering below, and the
+> mapping has never been checked from this side.
+
 Summary of what the other side owes:
 
 | Item | Where | Size |
