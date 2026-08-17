@@ -64,6 +64,10 @@ volatile uint16_t g_last_render_ms = 0;
 constexpr uint8_t  NO_TEMPLATE_REQUEST = 0xFF;
 volatile uint8_t   g_requested_template = NO_TEMPLATE_REQUEST;
 
+// Set by GET /slate. Forces scene rendering regardless of what CAN liveness
+// says, and is cleared the moment a CLAP_LINK arrives. See service() for why.
+volatile bool g_manual_override = false;
+
 // Built-in default slate layout for an 800×480 panel.
 //
 // Laid out as a film slate rather than a debug grid, because it is what the
@@ -246,12 +250,15 @@ void handle_slate(AsyncWebServerRequest* request) {
     }
     if (request->hasParam("clear")) { clear_fields(); set_count = 0; }
 
-    g_render_pending = true;
+    g_manual_override = true;
+    g_render_pending  = true;
 
-    char body[128];
+    char body[160];
     snprintf(body, sizeof(body),
-             "{\"ok\":true,\"fields_set\":%u,\"render\":\"queued\"}",
-             (unsigned) set_count);
+             "{\"ok\":true,\"fields_set\":%u,\"render\":\"queued\","
+             "\"manual_override\":true,\"can_link_seen\":%s}",
+             (unsigned) set_count,
+             can_link::stats().link_seen ? "true" : "false");
     AsyncWebServerResponse* r = request->beginResponse(200, "application/json", body);
     r->addHeader("Access-Control-Allow-Origin", "*");
     request->send(r);
@@ -442,20 +449,56 @@ void service() {
 
     // Mode first: a transition may itself queue a render.
     const auto step = can_link::mode_step();
-    if (step.changed) {
+
+    // An explicit operator command outranks inferred state. `/slate` means
+    // "show me these fields"; letting arbitration veto it made the bench
+    // endpoint silently dead for the entire period between fitting the
+    // transceiver and the bridge learning to send CLAP_LINK — which is the
+    // normal state of the world during bring-up, not an edge case.
+    //
+    // The override ends the moment the bridge says anything at all. Once
+    // CLAP_LINK exists, arbitration is authoritative and a stale manual
+    // override would be exactly the "panel lies about link health" failure
+    // the whole §8.5 design exists to prevent.
+    bool handover = false;
+    if (g_manual_override && can_link::stats().link_seen) {
+        g_manual_override = false;
+        // Force the entry action even if the tracker reports no transition.
+        // Without this, a first CLAP_LINK saying DOWN leaves the override
+        // cleared, the tracker already sitting in Screensaver (so
+        // `changed` is false), and enter_screensaver() never run — meaning
+        // the cycle timer is never armed and the panel freezes on the last
+        // manual render.
+        handover = true;
+        clap_log("[slate] manual override cleared — CLAP_LINK now arbitrating");
+    }
+
+    const bool scene = (step.mode == mode_state::Mode::Scene) || g_manual_override;
+
+    // Entry actions are skipped while the override holds, and that is
+    // load-bearing rather than an optimisation: enter_scene() clears every
+    // field, which would wipe the values /slate had just set.
+    if ((step.changed || handover) && !g_manual_override) {
         if (step.mode == mode_state::Mode::Scene) enter_scene();
         else                                     enter_screensaver();
     }
 
-    if (step.mode == mode_state::Mode::Screensaver) {
+    if (!scene) {
         if (g_next_cycle_ms != 0 &&
             (int32_t)(millis() - g_next_cycle_ms) >= 0) {
             screensaver::paint_next_slate();
             g_next_cycle_ms = millis() + screensaver::cycle_interval_s() * 1000UL;
         }
-        // A queued scene render is dropped rather than deferred: by the time
-        // the link returns, the fields it was going to draw are stale.
-        g_render_pending = false;
+        if (g_render_pending) {
+            // Say so. A dropped render that reported "queued" over HTTP is
+            // the kind of silent failure that costs an hour to diagnose.
+            clap_log("[slate] render dropped — screensaver mode "
+                     "(link_seen=%d ros2_up=%d time_synced=%d)",
+                     (int) can_link::stats().link_seen,
+                     (int) can_link::stats().ros2_up,
+                     (int) can_link::stats().time_synced);
+            g_render_pending = false;
+        }
         return;
     }
 

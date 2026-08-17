@@ -649,18 +649,36 @@ the query string and queues a composite.
 | `f0`…`f7` | Set that field's value |
 | `clear` | Blank every field first |
 
-`GET /slate?f2=SC%2014&f3=T%2003` → `{"ok":true,"fields_set":2,"render":"queued"}`
+```
+GET /slate?f2=SC%2014&f3=T%2003
+{"ok":true,"fields_set":2,"render":"queued","manual_override":true,"can_link_seen":false}
+```
 
 The response returns immediately and the panel repaints ~2 s later: the
 handler runs on the AsyncTCP task and blocking it for a full refresh trips
 LWIP and the watchdog, so rendering is deferred to `loop()` — the same
 discipline §2.1's deferred lock-in uses.
 
-**Works only while CAN is absent or the link is healthy.** In screensaver
-mode a queued scene render is dropped rather than deferred, because by the
-time the link returns the fields it would have drawn are stale. With no CAN
-driver at all, mode arbitration is skipped entirely and this endpoint behaves
-exactly as it did before Phase 17.
+#### Manual override
+
+**`/slate` forces scene rendering regardless of §8.5 arbitration**, and the
+override is cleared the moment any `CLAP_LINK` arrives. `manual_override` and
+`can_link_seen` in the response tell you which regime you are in.
+
+This exists because an explicit operator command should outrank inferred
+state. Without it the endpoint is silently dead for the whole period between
+fitting a CAN transceiver and the bridge learning to send `CLAP_LINK` —
+arbitration sees `link_seen == false`, resolves to screensaver, and discards
+a render the HTTP response already reported as `queued`. That is the normal
+state of the world during bring-up, not an edge case.
+
+Once `CLAP_LINK` exists, arbitration is authoritative: a stale manual override
+would be precisely the "panel lies about link health" failure §8.5 is designed
+to prevent.
+
+A render dropped for any other reason is logged with the three arbitration
+inputs, so a silent no-op is diagnosable from the log tail rather than by
+inspection.
 
 ---
 
